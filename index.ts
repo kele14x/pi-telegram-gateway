@@ -624,10 +624,19 @@ async function main() {
 
   const me = await bot.telegram.getMe();
   log(`🤖 running as @${me.username}`);
-  // Keep the Telegram command menu in sync with this gateway.
-  await bot.telegram.setMyCommands(BOT_COMMANDS).catch((err) => {
-    log(`[commands] sync failed: ${String((err as Error)?.message ?? err)}`);
-  });
+  // Keep the Telegram command menu in sync with this gateway. Scoped lists
+  // (all_private_chats / all_group_chats) shadow the default list, so push to
+  // every scope to avoid stale menus left by previous gateway software.
+  const scopes = [
+    undefined,
+    { type: "all_private_chats" as const },
+    { type: "all_group_chats" as const },
+  ];
+  for (const scope of scopes) {
+    await bot.telegram
+      .setMyCommands(BOT_COMMANDS, scope ? { scope } : undefined)
+      .catch((err) => log(`[commands] sync failed (${scope?.type ?? "default"}): ${String((err as Error)?.message ?? err)}`));
+  }
   if (PROXY_URL) log(`   proxy       : ${PROXY_URL}`);
   log(`   working dir : ${DEFAULT_CWD}`);
   log(`   sessions    : ${SESSIONS_DIR}`);
