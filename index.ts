@@ -510,6 +510,20 @@ bot.command("sessions", async (ctx) => {
 
 const KNOWN_COMMANDS = new Set(["start", "help", "new", "cd", "sessions", "model", "thinking", "stop", "status", "cwd"]);
 
+/** Shown in the Telegram command menu ("/" button); synced at startup. */
+const BOT_COMMANDS = [
+  { command: "start", description: "Welcome message and quick guide" },
+  { command: "help", description: "Show available commands" },
+  { command: "new", description: "Start a fresh conversation (keeps working folder)" },
+  { command: "cd", description: "Change this chat’s working folder, e.g. /cd ~/Desktop" },
+  { command: "cwd", description: "Show the current working folder" },
+  { command: "sessions", description: "Show session details for this chat" },
+  { command: "model", description: "Show or switch model, e.g. /model anthropic/claude-opus-4-5:high" },
+  { command: "thinking", description: "Show or set thinking level (off…max)" },
+  { command: "status", description: "Show model, context size, working folder" },
+  { command: "stop", description: "Abort the current run" },
+];
+
 bot.on("text", async (ctx) => {
   const text = ctx.message.text;
   if (!text.trim()) return;
@@ -610,6 +624,10 @@ async function main() {
 
   const me = await bot.telegram.getMe();
   log(`🤖 running as @${me.username}`);
+  // Keep the Telegram command menu in sync with this gateway.
+  await bot.telegram.setMyCommands(BOT_COMMANDS).catch((err) => {
+    log(`[commands] sync failed: ${String((err as Error)?.message ?? err)}`);
+  });
   if (PROXY_URL) log(`   proxy       : ${PROXY_URL}`);
   log(`   working dir : ${DEFAULT_CWD}`);
   log(`   sessions    : ${SESSIONS_DIR}`);
