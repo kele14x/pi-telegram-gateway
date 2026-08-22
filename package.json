@@ -1,0 +1,26 @@
+{
+  "name": "pi-telegram-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Talk to a pi coding agent from Telegram (chat gateway)",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env index.ts",
+    "selftest": "node --env-file-if-exists=.env index.ts --selftest",
+    "test": "node test/stream-test.mjs && node test/cd-test.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "^0.84.2",
+    "@earendil-works/pi-coding-agent": "^0.84.2",
+    "https-proxy-agent": "^9.1.0",
+    "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.0"
+  }
+}
