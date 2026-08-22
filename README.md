@@ -53,9 +53,8 @@ ALLOWED_TELEGRAM_IDS=123456789       # your Telegram numeric id(s), comma separa
 it replies with your numeric id, and the gateway logs it too. Add it to
 `ALLOWED_TELEGRAM_IDS` and restart.
 
-> ⚠️ **Security**: the agent has full access to your machine (shell included).
-> The allowlist is the only gate — everyone else is blocked (and told their id).
-> Never set `ALLOWED_TELEGRAM_IDS=*`.
+> ⚠️ **Security**: see the [Security](#-security) section. Short version — the
+> agent has full access to your machine, and the allowlist is the only gate.
 
 ## 📖 Commands
 
@@ -98,6 +97,36 @@ The bot's command menu (`/` button) is synced automatically at startup via
 - Per-chat folders persist across restarts in `sessions/meta.json`.
 - Project-level skills/prompts/`AGENTS.md` are still discovered from the launch
   folder (per-chat `/cd` affects file/shell tools).
+
+## 🔐 Security
+
+This gateway gives a Telegram user full access to a pi agent that runs on your
+machine — including the shell. Read this.
+
+**Access is gated by two independent secrets, both outside this repository:**
+
+1. **Bot token** — without it, nothing can speak to Telegram as your bot.
+2. **Allowlist** (`ALLOWED_TELEGRAM_IDS`) — the gateway only answers messages
+   from those Telegram ids. A leaked token *alone* is not enough: an attacker
+   would also need to send messages from one of your allowed accounts.
+
+**What is *not* in this repository:** your bot token (`.env`), per-chat
+conversation history (`sessions/`), or your pi model credentials
+(`~/.pi/agent/auth.json`). They are excluded or external — secrets are never
+committed.
+
+**Supply-chain caveat:** anyone with write access to the repo could push code
+that runs on your machine the next time you pull and start the gateway.
+That holds for any software you run from git.
+
+**Recommendations:**
+
+- Never set `ALLOWED_TELEGRAM_IDS=*` — it disables the only real gate.
+- Don't `git pull` blindly; review the diff (or pin to a commit hash).
+- Don't add collaborators you don't trust; keep 2FA on your GitHub account.
+- If you add an auto-update feature, pin by signed tag or commit hash.
+- Treat the host running the gateway as fully controlled: the agent is as
+  powerful as you are at a terminal.
 
 ## 🔬 Development
 
