@@ -158,6 +158,10 @@ interface ChatState {
   stream: TelegramStream | null;
   /** Serializes prompt submission per chat. */
   chain: Promise<void>;
+  /** Bumped by /stop and /new to cancel queued or in-flight submissions. */
+  generation: number;
+  /** In-flight session creation — dedupes concurrent getChatSession() calls. */
+  sessionInit: Promise<AgentSession | undefined> | null;
 }
 
 const chats = new Map<number, ChatState>();
@@ -280,6 +284,8 @@ function ensureChat(chatId: number): ChatState {
       session: null,
       stream: null,
       chain: Promise.resolve(),
+      generation: 0,
+      sessionInit: null,
     };
     chats.set(chatId, st);
   }
@@ -288,22 +294,65 @@ function ensureChat(chatId: number): ChatState {
 
 async function getChatSession(chatId: number): Promise<AgentSession> {
   const st = ensureChat(chatId);
-  if (!st.session) {
-    st.session = await createChatSession(chatId, st.cwd);
-    st.stream = new TelegramStream(bot, chatId);
-    wireSession(chatId, st.session, st.stream);
-    const m = st.session.model;
-    log(
-      `[chat ${chatId}] session ready — model: ${m ? `${m.provider}/${m.id}` : "default"}, cwd: ${st.cwd}, file: ${st.session.sessionFile}`,
-    );
+  for (;;) {
+    if (st.session) return st.session;
+    if (!st.sessionInit) {
+      // Capture the state this creation belongs to; if /new or /cd supersede
+      // it while the session is being built, discard the result instead of
+      // wiring a stale cwd into the live chat state.
+      const gen = st.generation;
+      const cwdAtCreate = st.cwd;
+      st.sessionInit = createChatSession(chatId, cwdAtCreate)
+        .then((session) => {
+          if (gen !== st.generation || st.cwd !== cwdAtCreate) {
+            log(`[chat ${chatId}] discarding superseded session (raced with /new or /cd)`);
+            session.dispose();
+            return undefined;
+          }
+          st.session = session;
+          st.stream = new TelegramStream(bot, chatId);
+          wireSession(chatId, session, st.stream);
+          const m = session.model;
+          log(
+            `[chat ${chatId}] session ready — model: ${m ? `${m.provider}/${m.id}` : "default"}, cwd: ${st.cwd}, file: ${session.sessionFile}`,
+          );
+          return session;
+        })
+        .finally(() => {
+          st.sessionInit = null;
+        });
+    }
+    const next = await st.sessionInit;
+    if (next) return next;
+    // Creation was superseded by /new or /cd — retry against the new state.
   }
-  return st.session;
 }
 
 async function submitPrompt(chatId: number, text: string, images?: ImageContent[]) {
   const st = ensureChat(chatId);
+  const gen = st.generation;
   const task = st.chain.then(async () => {
-    const session = await getChatSession(chatId);
+    // Cancelled while still queued (e.g. /stop or /new landed meanwhile).
+    if (gen !== st.generation) {
+      log(`[chat ${chatId}] dropped queued message after /stop or /new`);
+      return;
+    }
+    let session: AgentSession;
+    try {
+      session = await getChatSession(chatId);
+    } catch (err) {
+      // Session creation failures (corrupt history, bad config, …) must reach
+      // the user instead of vanishing into bot.catch().
+      const msg = err instanceof Error ? err.message : String(err);
+      log(`[chat ${chatId}] session creation failed: ${msg}`);
+      await safeSend(chatId, `⚠️ ${msg}`);
+      return;
+    }
+    // /stop (or /new) may have landed while the session was being created.
+    if (gen !== st.generation) {
+      await session.abort().catch(() => {});
+      return;
+    }
     try {
       if (session.isStreaming) {
         await session.prompt(text, { images, streamingBehavior: "followUp" });
@@ -408,11 +457,19 @@ bot.command("help", async (ctx) => {
 bot.command("new", async (ctx) => {
   const chatId = ctx.chat.id;
   const st = chats.get(chatId);
-  if (st?.session) {
-    try {
-      st.session.dispose();
-    } catch (err) {
-      log(`[new] dispose: ${String((err as Error)?.message ?? err)}`);
+  if (st) {
+    // Cancel everything pending for this chat BEFORE tearing the session
+    // down, so a queued or in-flight prompt can't resurrect the old
+    // conversation or keep writing to the file we're about to delete.
+    st.generation++;
+    if (st.session) {
+      st.session.clearQueue();
+      await st.session.abort().catch(() => {}); // abort() waits for idle
+      try {
+        st.session.dispose();
+      } catch (err) {
+        log(`[new] dispose: ${String((err as Error)?.message ?? err)}`);
+      }
     }
   }
   // Remove the persisted history even when no session is in memory (e.g. right
@@ -486,14 +543,18 @@ bot.command("thinking", async (ctx) => {
 
 bot.command("stop", async (ctx) => {
   const st = chats.get(ctx.chat.id);
-  if (!st?.session) {
+  if (!st) {
     await ctx.reply("Nothing is running.");
     return;
   }
-  // Cancel-all semantics: abort the active run AND drop any queued follow-ups
-  // (the SDK would otherwise drain them after the abort via continue()).
-  st.session.clearQueue();
-  await st.session.abort().catch(() => {});
+  // Cancel-all semantics: bump the generation so queued st.chain submissions
+  // are dropped too (the SDK queue is cleared separately — it would otherwise
+  // drain via continue() after the abort).
+  st.generation++;
+  if (st.session) {
+    st.session.clearQueue();
+    await st.session.abort().catch(() => {});
+  }
   await ctx.reply("🛑 Aborted the current run and dropped queued messages.");
 });
 
@@ -648,13 +709,11 @@ function log(...args: unknown[]) {
   console.log(new Date().toISOString(), ...args);
 }
 
-/** Strip credentials from a proxy URL before it reaches the logs. */
-function redactProxyUrl(url: string): string {
+/** Log only the proxy's origin — never credentials or the full URL. */
+function proxyOrigin(url: string): string {
   try {
     const u = new URL(url);
-    if (u.username) u.username = "***";
-    if (u.password) u.password = "***";
-    return u.toString();
+    return `${u.protocol}//${u.hostname}${u.port ? `:${u.port}` : ""}`;
   } catch {
     return "(unparseable proxy URL)";
   }
@@ -748,7 +807,7 @@ async function main() {
     await withRetry(() => bot.telegram.setMyCommands(BOT_COMMANDS, scope ? { scope } : undefined), 3)
       .catch((err) => log(`[commands] sync failed (${scope?.type ?? "default"}): ${String((err as Error)?.message ?? err)}`));
   }
-  if (PROXY_URL) log(`   proxy       : ${redactProxyUrl(PROXY_URL)}`);
+  if (PROXY_URL) log(`   proxy       : ${proxyOrigin(PROXY_URL)}`);
   if (IPV4_ONLY) log("   ipv4 only   : on (PI_TELEGRAM_IPV4_ONLY=true)");
   log(`   working dir : ${DEFAULT_CWD}`);
   log(`   sessions    : ${SESSIONS_DIR}`);
