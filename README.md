@@ -3,7 +3,7 @@
   <p align="center">Chat with a <a href="https://github.com/arendil-works/pi-coding-agent">pi coding agent</a> from Telegram — same agent, same tools, through a chat.</p>
 </p>
 
-> A chat gateway in the spirit of Hermes Agent: your own full-coding-agent
+> A chat gateway: your own full-coding-agent
 > Telegram bot backed by the pi SDK, running on your machine.
 
 ## ✨ Features
@@ -186,7 +186,6 @@ sessions/            per-chat session files (gitignored)
 ## 🙏 Credits
 
 - Built on the [pi coding agent SDK](https://github.com/arendil-works/pi-coding-agent)
-- Gateway concept inspired by [Hermes Agent](https://github.com/1933Eran/Hermes.agent)
 
 ## 📄 License
 
