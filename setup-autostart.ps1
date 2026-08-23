@@ -9,7 +9,45 @@
 # Remove: powershell -ExecutionPolicy Bypass -File remove-autostart.ps1
 # Re-run this script after moving the repo or changing the Node path.
 
+param(
+  [switch]$LibraryOnly
+)
+
 $ErrorActionPreference = "Stop"
+
+function New-GatewayLauncherContent {
+  param(
+    [Parameter(Mandatory = $true)][string]$GatewayRoot,
+    [Parameter(Mandatory = $true)][string]$NodePath,
+    [Parameter(Mandatory = $true)][string]$EntryPath,
+    [Parameter(Mandatory = $true)][string]$RotateScriptPath,
+    [Parameter(Mandatory = $true)][string]$GatewayLogPath,
+    [Parameter(Mandatory = $true)][string]$CmdPath
+  )
+
+  $template = @'
+Set sh = CreateObject("WScript.Shell")
+sh.CurrentDirectory = "{ROOT}"
+rotateCode = sh.Run("{ROTATE}", 0, True)
+code = sh.Run("{CMD}", 0, True)
+WScript.Quit code
+'@
+
+  $rotateLine = '"{NODE}" "{ROTATE_SCRIPT}" --root "{ROOT}"'
+  $rotateLine = $rotateLine.Replace("{NODE}", $NodePath).Replace("{ROTATE_SCRIPT}", $RotateScriptPath).Replace("{ROOT}", $GatewayRoot)
+  $vbsRotate = $rotateLine.Replace('"', '""')
+
+  # cmd.exe /s removes the outer quote pair after /c. The doubled opening
+  # quote is therefore required to preserve the separately quoted Node path.
+  $cmdLine = '"{CMD_EXE}" /d /s /c ""{NODE}" --env-file-if-exists=.env "{ENTRY}" >> "{LOG}" 2>&1"'
+  $cmdLine = $cmdLine.Replace("{CMD_EXE}", $CmdPath).Replace("{NODE}", $NodePath).Replace("{ENTRY}", $EntryPath).Replace("{LOG}", $GatewayLogPath)
+  $vbsCmd = $cmdLine.Replace('"', '""')
+
+  return $template.Replace("{ROOT}", $GatewayRoot).Replace("{ROTATE}", $vbsRotate).Replace("{CMD}", $vbsCmd)
+}
+
+if ($LibraryOnly) { return }
+
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Entry = [IO.Path]::GetFullPath((Join-Path $Root "index.ts"))
 $node = (Get-Command node).Source
@@ -25,24 +63,11 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 #    waits for it, and passes the exit code through so Task Scheduler's
 #    RestartOnFailure still sees crashes. ────────────────────────────────────
 $vbsPath = Join-Path $Root "gateway-hidden.vbs"
-# Run with window style 0 = hidden (CREATE_NO_WINDOW) and wait for exit,
-# returning the exit code so Task Scheduler still sees crashes.
-$vbs = @'
-Set sh = CreateObject("WScript.Shell")
-sh.CurrentDirectory = "{ROOT}"
-rotateCode = sh.Run("{ROTATE}", 0, True)
-code = sh.Run("{CMD}", 0, True)
-WScript.Quit code
-'@
-# Build the command line, then double every quote so it embeds cleanly in VBS.
 $rotateScript = Join-Path $Root "scripts\rotate-logs.mjs"
-$rotateLine = '"{NODE}" "{ROTATE_SCRIPT}" --root "{ROOT}"'
-$rotateLine = $rotateLine.Replace("{NODE}", $node).Replace("{ROTATE_SCRIPT}", $rotateScript).Replace("{ROOT}", $Root)
-$vbsRotate = $rotateLine.Replace('"', '""')
-$cmdLine = 'cmd /c "{NODE}" --env-file-if-exists=.env "{ENTRY}" >> logs\gateway.log 2>&1'
-$cmdLine = $cmdLine.Replace("{NODE}", $node).Replace("{ENTRY}", $Entry)
-$vbsCmd = $cmdLine.Replace('"', '""')
-$vbs = $vbs.Replace("{ROOT}", $Root).Replace("{ROTATE}", $vbsRotate).Replace("{CMD}", $vbsCmd)
+$gatewayLog = Join-Path $logDir "gateway.log"
+$cmd = Join-Path $env:SystemRoot "System32\cmd.exe"
+$vbs = New-GatewayLauncherContent -GatewayRoot $Root -NodePath $node -EntryPath $Entry `
+  -RotateScriptPath $rotateScript -GatewayLogPath $gatewayLog -CmdPath $cmd
 Set-Content -Path $vbsPath -Value $vbs -Encoding ASCII
 
 # ── Register the scheduled task ─────────────────────────────────────────────
