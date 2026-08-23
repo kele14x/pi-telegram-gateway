@@ -6,13 +6,18 @@
 # Usage:  powershell -ExecutionPolicy Bypass -File setup-autostart.ps1
 # Run it: schtasks /Run /TN "pi-telegram-gateway"
 # Stop:   schtasks /End /TN "pi-telegram-gateway"
-# Remove: schtasks /Delete /TN "pi-telegram-gateway" /F
+# Remove: powershell -ExecutionPolicy Bypass -File remove-autostart.ps1
 # Re-run this script after moving the repo or changing the Node path.
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Entry = [IO.Path]::GetFullPath((Join-Path $Root "index.ts"))
 $node = (Get-Command node).Source
+
+# Idempotent refresh/migration: remove the prior task using the absolute paths
+# recorded in its XML before generating and registering this repo's launcher.
+& (Join-Path $Root "remove-autostart.ps1") -Quiet
+
 $logDir = Join-Path $Root "logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 

@@ -9,11 +9,14 @@ const pkg = JSON.parse(readFileSync(join(root, "..", "package.json"), "utf8"));
 const SCRIPT_DESC = {
   start: "run the gateway in the foreground (visible output)",
   "start:daemon": "start it in the background via the Windows scheduled task (hidden)",
+  "autostart:setup": "register or safely refresh the Windows scheduled task",
+  "autostart:remove": "remove the task and generated hidden launcher",
   stop: "stop the gateway cleanly (kills the full process tree)",
   status: "show task status, process PID, recent log, sessions",
   help: "this cheat sheet",
   selftest: "send one prompt through the pi SDK (no Telegram bot needed)",
   test: "run the offline unit tests",
+  "test:windows": "run offline Windows task-management tests",
   typecheck: "type-check the TypeScript sources (tsc --noEmit)",
 };
 
@@ -22,11 +25,12 @@ console.log("=".repeat(52));
 console.log("\nLOCAL CONSOLE COMMANDS (run from this project folder):\n");
 for (const [name, script] of Object.entries(pkg.scripts ?? {})) {
   const desc = SCRIPT_DESC[name] ?? "";
-  console.log(`  npm run ${name.padEnd(13)} ${desc}`);
+  console.log(`  npm run ${name.padEnd(18)} ${desc}`);
 }
 console.log(`
-  setup-autostart.ps1    register/refresh the scheduled task (run once)
-  setup file: ./setup-autostart.ps1   hidden launcher: ./gateway-hidden.vbs`);
+  setup-autostart.ps1    register/refresh the scheduled task
+  remove-autostart.ps1   stop and remove the task; keep config/data/logs
+  generated launcher: ./gateway-hidden.vbs`);
 
 console.log("TELEGRAM BOT COMMANDS (send to @your_bot in chat):\n");
 const botCmds = [

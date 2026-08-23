@@ -95,8 +95,8 @@ The bot's command menu (`/` button) is synced automatically at startup via
 A Scheduled Task keeps the gateway alive across logons and crashes:
 
 ```powershell
-# one-time setup (registers 'pi-telegram-gateway' task)
-powershell -ExecutionPolicy Bypass -File setup-autostart.ps1
+# register or refresh the 'pi-telegram-gateway' task
+npm run autostart:setup
 
 # start it right now
 schtasks /Run /TN "pi-telegram-gateway"
@@ -104,16 +104,21 @@ schtasks /Run /TN "pi-telegram-gateway"
 # check status
 schtasks /Query /TN "pi-telegram-gateway"
 
-# remove the task
-schtasks /Delete /TN "pi-telegram-gateway" /F
+# stop and remove the task + generated launcher (keeps config/data/logs)
+npm run autostart:remove
 ```
 
 The task runs the gateway in the foreground (logs to `logs/gateway.log`) so
 Task Scheduler restarts it 1 minute after a crash. The gateway holds an atomic,
 heartbeat-backed single-instance lock (`logs/gateway.instance.lock`, with
 owner metadata in `logs/gateway.lock`) so a manual `npm start` cannot run a
-second, conflicting poller. Re-run `setup-autostart.ps1` after moving the repo
-or upgrading Node (it pins the Node and repository paths at setup time).
+second, conflicting poller. Re-run `npm run autostart:setup` after moving the
+repo or upgrading Node (it pins the Node and repository paths at setup time).
+Setup first removes any existing task using the old absolute paths recorded in
+its XML, so it also works when the repository has already moved. For a planned
+move, `npm run autostart:remove` before moving and `npm run autostart:setup`
+afterward is the clearest workflow. Removal never deletes `.env`, sessions, or
+log files.
 Before each managed launch, non-empty logs are moved into `logs/archive/`; the
 newest 20 archives are retained for each log type.
 

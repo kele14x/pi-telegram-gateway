@@ -58,7 +58,8 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 | `session-errors.ts` | defers assistant error rendering until `agent_end` determines whether the attempt will retry |
 | `telegram-stream.ts` | `TelegramStream`: live edits, chunking >3900 chars, ~800 ms edit throttle, 429 retry (retry-after honored, cap 30 s) |
 | `scripts/rotate-logs.mjs` | archives non-empty logs before managed launches and retains 20 archives per log type |
-| `setup-autostart.ps1` | registers Windows Scheduled Task `pi-telegram-gateway` (logon start, crash-restart, hidden window via generated `gateway-hidden.vbs`) |
+| `setup-autostart.ps1` | safely replaces and registers Windows Scheduled Task `pi-telegram-gateway` (logon start, crash-restart, hidden window via generated `gateway-hidden.vbs`) |
+| `remove-autostart.ps1` | idempotent task/launcher cleanup; reads the existing task XML so a task registered from an old repo path can be removed safely without deleting config/data/logs |
 | `start-gateway.ps1` / `stop.ps1` / `status.ps1` | manual start (detached), clean stop (kills leaked task tree), status overview |
 | `scripts/help.mjs` | `npm run help` cheat sheet |
 | `test/` | offline tests: `stream-test.mjs` (chunking/retry), `cd-test.mjs` (cwd override reopen), `commands-scope.mjs` (per-scope command menus) |
