@@ -116,6 +116,13 @@ const CHAT_HINT = [
 const META_FILE = join(SESSIONS_DIR, "meta.json");
 const chatMeta = new Map<number, string>();
 function loadChatMeta() {
+  // Remove a stale temp file left by a crash mid-save (the next save
+  // overwrites it anyway, but keep the directory tidy).
+  try {
+    rmSync(`${META_FILE}.tmp`, { force: true });
+  } catch {
+    /* ignore */
+  }
   let raw: string;
   try {
     raw = readFileSync(META_FILE, "utf8");
@@ -133,7 +140,7 @@ function loadChatMeta() {
     log(`[meta] ignoring unreadable ${META_FILE}: ${String((err as Error)?.message ?? err)}`);
   }
 }
-function saveChatMeta(chatId: number, cwd: string) {
+function saveChatMeta(chatId: number, cwd: string): boolean {
   chatMeta.set(chatId, cwd);
   try {
     mkdirSync(SESSIONS_DIR, { recursive: true });
@@ -142,8 +149,10 @@ function saveChatMeta(chatId: number, cwd: string) {
     const tmp = `${META_FILE}.tmp`;
     writeFileSync(tmp, JSON.stringify(Object.fromEntries(chatMeta), null, 2));
     renameSync(tmp, META_FILE);
+    return true;
   } catch (err) {
     log(`[meta] save failed: ${String((err as Error)?.message ?? err)}`);
+    return false;
   }
 }
 
@@ -599,7 +608,10 @@ bot.command("cd", async (ctx) => {
     return;
   }
   st.cwd = target;
-  saveChatMeta(ctx.chat.id, target);
+  const persisted = saveChatMeta(ctx.chat.id, target);
+  // Invalidate queued submissions and any in-flight session creation, so
+  // nothing from the old folder runs after the switch.
+  st.generation++;
   if (st.session) {
     // History is kept on disk; the session is rebuilt with the new folder on
     // the next message.
@@ -612,7 +624,10 @@ bot.command("cd", async (ctx) => {
     st.stream = null;
   }
   log(`[chat ${ctx.chat.id}] cwd -> ${target}`);
-  await ctx.reply(`📁 Working folder set to:\n${target}\n\nConversation history is kept — your next message continues in this folder.`);
+  await ctx.reply(
+    `📁 Working folder set to:\n${target}\n\nConversation history is kept — your next message continues in this folder.` +
+      (persisted ? "" : "\n\n⚠️ Couldn't save this folder to meta.json — it will revert after a restart."),
+  );
 });
 
 bot.command("sessions", async (ctx) => {
@@ -654,7 +669,7 @@ const BOT_COMMANDS = [
   { command: "model", description: "Show or switch model, e.g. /model anthropic/claude-opus-4-5:high" },
   { command: "thinking", description: "Show or set thinking level (off…max)" },
   { command: "status", description: "Show model, context size, working folder" },
-  { command: "stop", description: "Abort the current run" },
+  { command: "stop", description: "Abort the current run and drop queued messages" },
 ];
 
 bot.on("text", async (ctx) => {
@@ -705,8 +720,21 @@ bot.catch((err, ctx) => {
 
 // ══════════════════════════════ Bootstrap ═════════════════════════════════
 
+/** Redact known secrets (bot token, full proxy URL) from anything we log. */
+function redactSecrets(text: string): string {
+  let s = text;
+  if (BOT_TOKEN) s = s.split(BOT_TOKEN).join("<token>");
+  if (PROXY_URL) s = s.split(PROXY_URL).join(proxyOrigin(PROXY_URL));
+  return s;
+}
+
 function log(...args: unknown[]) {
-  console.log(new Date().toISOString(), ...args);
+  console.log(
+    new Date().toISOString(),
+    ...args.map((a) =>
+      typeof a === "string" ? redactSecrets(a) : a instanceof Error ? redactSecrets(String(a.message ?? a)) : a,
+    ),
+  );
 }
 
 /** Log only the proxy's origin — never credentials or the full URL. */
@@ -757,8 +785,9 @@ async function main() {
     const tmpSessions = mkdtempSync(join(os.tmpdir(), "pi-gw-selftest-"));
     const out: string[] = [];
     let failed: unknown = null;
+    let session: AgentSession | undefined;
     try {
-      const session = await createChatSession(0x0bad0bad, DEFAULT_CWD, tmpSessions);
+      session = await createChatSession(0x0bad0bad, DEFAULT_CWD, tmpSessions);
       session.subscribe((event) => {
         if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
           out.push(event.assistantMessageEvent.delta);
@@ -769,10 +798,15 @@ async function main() {
       console.log("── agent reply ──");
       console.log(out.join(""));
       console.log("──────────────────");
-      session.dispose();
     } catch (err) {
       failed = err;
     } finally {
+      // Dispose even when the prompt failed, then remove the temp sessions dir.
+      try {
+        session?.dispose();
+      } catch {
+        /* ignore */
+      }
       try {
         rmSync(tmpSessions, { recursive: true, force: true });
       } catch {
@@ -780,6 +814,8 @@ async function main() {
       }
     }
     // Assert the expected output instead of reporting success blindly.
+    // trim() only strips the trailing newline models routinely append; the
+    // content itself must still match exactly.
     const reply = out.join("").trim();
     if (failed) {
       console.error(`✖ selftest FAILED: ${String((failed as Error)?.message ?? failed)}`);
