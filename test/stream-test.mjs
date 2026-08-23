@@ -239,6 +239,41 @@ function assert(cond, label) {
   assert(state.includes("first run") && state.includes("second run"), "both runs present, no cross-contamination");
 }
 
+// ── Scenario J: stale 429 retry must not overwrite a newer edit ─────────────
+{
+  console.log("J) stale 429 retry does not regress newer content");
+  const calls = [];
+  const messages = new Map([[1, "a"]]);
+  let failNextEdit = true;
+  const bot = {
+    telegram: {
+      async sendMessage(chatId, text) {
+        calls.push({ type: "send", chatId, text });
+        return { message_id: 1 };
+      },
+      async editMessageText(chatId, message_id, _inline, text) {
+        calls.push({ type: "edit", chatId, message_id, text });
+        if (failNextEdit) {
+          failNextEdit = false;
+          throw new Error("429: Too Many Requests: retry after 0");
+        }
+        messages.set(message_id, text);
+        return { ok: true };
+      },
+    },
+  };
+  const s = new TelegramStream(bot, 77);
+  s.append("a");
+  await sleep(100);
+  s.append("b");
+  await sleep(900); // edit of "ab" fails and schedules a retry
+  s.append("c");
+  await sleep(300); // newer "abc" edit succeeds before the retry
+  await sleep(1800); // allow retry timer to fire
+  assert(messages.get(1) === "abc", `newer content remains (got ${JSON.stringify(messages.get(1))})`);
+  assert(calls.some((c) => c.text === "ab") && calls.some((c) => c.text === "abc"), "both edits were attempted");
+}
+
 if (failures === 0) {
   console.log("\nAll stream tests passed ✅");
 } else {
