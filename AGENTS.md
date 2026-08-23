@@ -37,8 +37,15 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
   `TelegramStream`; `tool_execution_start/end` update a status line; the run is
   finalized on `agent_end` (NOT `message_end` — multiple assistant turns per
   run). `agent_start` resets the stream.
-- **Queueing**: if busy, `session.prompt(text, { streamingBehavior: "followUp" })`
-  queues; per-chat `ChatState.chain` serializes submissions.
+- **Queueing**: handlers are non-blocking — they dispatch into a per-chat
+  `ChatState.chain` and return, so Telegram polling (and `/stop`) is never
+  held up by a long agent run. If a prompt is already running, an immediate
+  `📥 Queued` acknowledgment is sent; the SDK's `followUp` queue is a fallback.
+- **Cancellation**: `/stop` bumps a per-chat generation token (queued chain
+  jobs check it and drop themselves), clears the SDK queue, and aborts the
+  active run. `/new` does the same before disposing the session and deleting
+  the history file. `/model`/`/thinking` are serialized behind the prompt
+  chain via `enqueueChatOp`.
 
 ## Key files
 

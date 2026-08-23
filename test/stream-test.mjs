@@ -172,6 +172,73 @@ function assert(cond, label) {
   assert(calls.send.length >= 1 && calls.edit.length >= 1, "send + successful edit recorded");
 }
 
+// ── Scenario H: slow API — overlapping flush and finalize must not double-send ─
+{
+  console.log("H) concurrent flush + finalize (slow sendMessage)");
+  const sends = [];
+  const edits = [];
+  const nextId = [1];
+  const bot = {
+    telegram: {
+      async sendMessage(chatId, text) {
+        await sleep(50); // slow API: an unserialized stream used to double-send here
+        const message_id = nextId[0]++;
+        sends.push({ chatId, message_id, text });
+        return { message_id };
+      },
+      async editMessageText(chatId, message_id, _inline, text) {
+        edits.push({ chatId, message_id, text });
+        return { ok: true };
+      },
+    },
+  };
+  const s = new TelegramStream(bot, 77);
+  s.append("hello");
+  await sleep(30); // throttled flush has started; its sendMessage is still pending
+  await s.finalize(); // finalize must queue BEHIND the in-flight flush op
+  await sleep(100);
+  assert(sends.length === 1, `exactly one sendMessage (got ${sends.length})`);
+  assert(sends[0]?.text === "hello", "content delivered");
+  assert(edits.length >= 1, "second op was an edit, not a second send");
+}
+
+// ── Scenario I: slow API — reset while the previous run is still finalizing ──
+{
+  console.log("I) reset during an in-flight finalize (slow sendMessage)");
+  const sends = [];
+  const messages = new Map();
+  const nextId = [1];
+  const bot = {
+    telegram: {
+      async sendMessage(chatId, text) {
+        await sleep(50);
+        const message_id = nextId[0]++;
+        sends.push({ chatId, message_id, text });
+        messages.set(message_id, text);
+        return { message_id };
+      },
+      async editMessageText(chatId, message_id, _inline, text) {
+        messages.set(message_id, text);
+        return { ok: true };
+      },
+    },
+  };
+  const s = new TelegramStream(bot, 77);
+  s.append("first run");
+  await sleep(30); // old run's send is pending in the I/O chain
+  const fin = s.finalize();
+  s.reset(); // new run starts while the old finalize is mid-flight
+  s.append("second run");
+  await sleep(200);
+  await fin;
+  await sleep(50);
+  assert(sends.length === 2, `two messages sent (got ${sends.length})`);
+  assert(sends[0]?.text === "first run", "old run delivered first");
+  assert(sends[1]?.text === "second run", "new run delivered second");
+  const state = [...messages.values()].join("|");
+  assert(state.includes("first run") && state.includes("second run"), "both runs present, no cross-contamination");
+}
+
 if (failures === 0) {
   console.log("\nAll stream tests passed ✅");
 } else {

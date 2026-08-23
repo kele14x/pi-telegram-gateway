@@ -171,6 +171,8 @@ interface ChatState {
   generation: number;
   /** In-flight session creation — dedupes concurrent getChatSession() calls. */
   sessionInit: Promise<AgentSession | undefined> | null;
+  /** Prompt jobs currently executing (drives the immediate "queued" ack). */
+  busy: number;
 }
 
 const chats = new Map<number, ChatState>();
@@ -295,6 +297,7 @@ function ensureChat(chatId: number): ChatState {
       chain: Promise.resolve(),
       generation: 0,
       sessionInit: null,
+      busy: 0,
     };
     chats.set(chatId, st);
   }
@@ -337,45 +340,67 @@ async function getChatSession(chatId: number): Promise<AgentSession> {
   }
 }
 
-async function submitPrompt(chatId: number, text: string, images?: ImageContent[]) {
+/** Dispatch a prompt to the per-chat queue. Never awaits the agent run — the
+ * caller returns immediately so Telegram polling stays responsive. */
+function submitPrompt(chatId: number, text: string, images?: ImageContent[]) {
   const st = ensureChat(chatId);
   const gen = st.generation;
+  if (st.busy > 0) {
+    // Immediate acknowledgment so the user knows their message is queued.
+    void safeSend(chatId, `📥 Queued (after current task): “${text.slice(0, 60)}…”`);
+  }
   const task = st.chain.then(async () => {
-    // Cancelled while still queued (e.g. /stop or /new landed meanwhile).
-    if (gen !== st.generation) {
-      log(`[chat ${chatId}] dropped queued message after /stop or /new`);
-      return;
-    }
-    let session: AgentSession;
+    st.busy++;
     try {
-      session = await getChatSession(chatId);
-    } catch (err) {
-      // Session creation failures (corrupt history, bad config, …) must reach
-      // the user instead of vanishing into bot.catch().
-      const msg = err instanceof Error ? err.message : String(err);
-      log(`[chat ${chatId}] session creation failed: ${msg}`);
-      await safeSend(chatId, `⚠️ ${msg}`);
-      return;
-    }
-    // /stop (or /new) may have landed while the session was being created.
-    if (gen !== st.generation) {
-      await session.abort().catch(() => {});
-      return;
-    }
-    try {
-      if (session.isStreaming) {
-        await session.prompt(text, { images, streamingBehavior: "followUp" });
-      } else {
-        await session.prompt(text, { images });
+      // Cancelled while still queued (e.g. /stop or /new landed meanwhile).
+      if (gen !== st.generation) {
+        log(`[chat ${chatId}] dropped queued message after /stop or /new`);
+        return;
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log(`[chat ${chatId}] prompt error: ${msg}`);
-      await safeSend(chatId, `⚠️ ${msg}`);
+      let session: AgentSession;
+      try {
+        session = await getChatSession(chatId);
+      } catch (err) {
+        // Session creation failures (corrupt history, bad config, …) must reach
+        // the user instead of vanishing into bot.catch().
+        const msg = err instanceof Error ? err.message : String(err);
+        log(`[chat ${chatId}] session creation failed: ${msg}`);
+        await safeSend(chatId, `⚠️ ${msg}`);
+        return;
+      }
+      // /stop (or /new) may have landed while the session was being created.
+      if (gen !== st.generation) {
+        await session.abort().catch(() => {});
+        return;
+      }
+      try {
+        if (session.isStreaming) {
+          await session.prompt(text, { images, streamingBehavior: "followUp" });
+        } else {
+          await session.prompt(text, { images });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log(`[chat ${chatId}] prompt error: ${msg}`);
+        await safeSend(chatId, `⚠️ ${msg}`);
+      }
+    } finally {
+      st.busy--;
     }
   });
   st.chain = task.catch(() => {});
-  await task;
+}
+
+/**
+ * Enqueue a non-prompt operation (e.g. /model, /thinking) behind the chat's
+ * prompt chain so it never runs concurrently with a submission and its reply
+ * reflects the session state at the moment it actually applies.
+ */
+function enqueueChatOp(chatId: number, fn: () => Promise<void>): Promise<void> {
+  const st = ensureChat(chatId);
+  const op = st.chain.then(fn);
+  st.chain = op.catch(() => {});
+  return op;
 }
 
 async function safeSend(chatId: number, text: string) {
@@ -410,14 +435,16 @@ async function withRetry<T>(
 
 // ═════════════════════════════ Telegram bot ═══════════════════════════════
 
-const bot = new Telegraf(
-  BOT_TOKEN,
-  PROXY_URL
-    ? { telegram: { agent: new HttpsProxyAgent(PROXY_URL) } }
-    : IPV4_ONLY
-      ? { telegram: { agent: new NodeHttpsAgent({ lookup: ipv4Lookup }) } }
-      : undefined,
-);
+// handlerTimeout: Infinity — handlers never await a long agent run (they
+// dispatch into the per-chat chain and return), so telegraf's 90s default
+// would only kill queued command handlers (e.g. /model waiting for a run).
+const botOptions: NonNullable<ConstructorParameters<typeof Telegraf>[1]> = {
+  handlerTimeout: Infinity,
+};
+if (PROXY_URL) botOptions.telegram = { agent: new HttpsProxyAgent(PROXY_URL) };
+else if (IPV4_ONLY) botOptions.telegram = { agent: new NodeHttpsAgent({ lookup: ipv4Lookup }) };
+
+const bot = new Telegraf(BOT_TOKEN, botOptions);
 
 /** Access guard: only allowlisted users/chats may talk to the agent. */
 bot.use(async (ctx, next) => {
@@ -495,59 +522,66 @@ bot.command("new", async (ctx) => {
 
 bot.command("model", async (ctx) => {
   const arg = ctx.payload.trim();
-  try {
-    const session = await getChatSession(ctx.chat.id);
-    if (!arg) {
-      const m = session.model;
-      await ctx.reply(
-        `Model: ${m ? `${m.provider}/${m.id}` : "(default)"}\nThinking: ${session.thinkingLevel}\n\n` +
-          "Switch with /model <name>, e.g. /model openai/gpt-5:medium",
-      );
-      return;
+  // Serialized behind the prompt chain: never applies mid-run, and its reply
+  // reflects the session state at the moment it actually executes.
+  await enqueueChatOp(ctx.chat.id, async () => {
+    try {
+      const session = await getChatSession(ctx.chat.id);
+      if (!arg) {
+        const m = session.model;
+        await ctx.reply(
+          `Model: ${m ? `${m.provider}/${m.id}` : "(default)"}\nThinking: ${session.thinkingLevel}\n\n` +
+            "Switch with /model <name>, e.g. /model openai/gpt-5:medium",
+        );
+        return;
+      }
+      if (arg === "cycle") {
+        const r = await session.cycleModel();
+        const m = session.model;
+        await ctx.reply(`🔄 ${r ? "Cycled" : "No models to cycle through"} — now: ${m ? `${m.provider}/${m.id}` : "?"}`);
+        return;
+      }
+      const r = resolveCliModel({ cliModel: arg, modelRuntime });
+      if (r.error || !r.model) {
+        await ctx.reply(`⚠️ ${r.error ?? "Model not found"}`);
+        return;
+      }
+      await session.setModel(r.model);
+      if (r.thinkingLevel) await session.setThinkingLevel(r.thinkingLevel);
+      await ctx.reply(`✓ Model set to ${r.model.provider}/${r.model.id}`);
+    } catch (err) {
+      await ctx.reply(`⚠️ ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
     }
-    if (arg === "cycle") {
-      const r = await session.cycleModel();
-      const m = session.model;
-      await ctx.reply(`🔄 ${r ? "Cycled" : "No models to cycle through"} — now: ${m ? `${m.provider}/${m.id}` : "?"}`);
-      return;
-    }
-    const r = resolveCliModel({ cliModel: arg, modelRuntime });
-    if (r.error || !r.model) {
-      await ctx.reply(`⚠️ ${r.error ?? "Model not found"}`);
-      return;
-    }
-    await session.setModel(r.model);
-    if (r.thinkingLevel) await session.setThinkingLevel(r.thinkingLevel);
-    await ctx.reply(`✓ Model set to ${r.model.provider}/${r.model.id}`);
-  } catch (err) {
-    await ctx.reply(`⚠️ ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
-  }
+  });
 });
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 bot.command("thinking", async (ctx) => {
   const arg = ctx.payload.trim().toLowerCase();
-  try {
-    const session = await getChatSession(ctx.chat.id);
-    if (!arg) {
-      await ctx.reply(`Thinking: ${session.thinkingLevel}\nSet with /thinking ${THINKING_LEVELS.join(" / ")} or /thinking cycle`);
-      return;
+  // Serialized behind the prompt chain, same as /model.
+  await enqueueChatOp(ctx.chat.id, async () => {
+    try {
+      const session = await getChatSession(ctx.chat.id);
+      if (!arg) {
+        await ctx.reply(`Thinking: ${session.thinkingLevel}\nSet with /thinking ${THINKING_LEVELS.join(" / ")} or /thinking cycle`);
+        return;
+      }
+      if (arg === "cycle") {
+        const level = session.cycleThinkingLevel();
+        await ctx.reply(`🔄 thinking level: ${level}`);
+        return;
+      }
+      if (!(THINKING_LEVELS as readonly string[]).includes(arg)) {
+        await ctx.reply(`Valid levels: ${THINKING_LEVELS.join(", ")}`);
+        return;
+      }
+      session.setThinkingLevel(arg as (typeof THINKING_LEVELS)[number]);
+      await ctx.reply(`✓ thinking level: ${arg}`);
+    } catch (err) {
+      await ctx.reply(`⚠️ ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
     }
-    if (arg === "cycle") {
-      const level = session.cycleThinkingLevel();
-      await ctx.reply(`🔄 thinking level: ${level}`);
-      return;
-    }
-    if (!(THINKING_LEVELS as readonly string[]).includes(arg)) {
-      await ctx.reply(`Valid levels: ${THINKING_LEVELS.join(", ")}`);
-      return;
-    }
-    session.setThinkingLevel(arg as (typeof THINKING_LEVELS)[number]);
-    await ctx.reply(`✓ thinking level: ${arg}`);
-  } catch (err) {
-    await ctx.reply(`⚠️ ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
-  }
+  });
 });
 
 bot.command("stop", async (ctx) => {
@@ -683,7 +717,10 @@ bot.on("text", async (ctx) => {
     }
     return;
   }
-  await submitPrompt(ctx.chat.id, text);
+  // Non-blocking by design: submitPrompt dispatches into the per-chat chain
+  // and returns immediately, so Telegram polling stays responsive (/stop,
+  // other chats and commands are not held up by a long agent run).
+  submitPrompt(ctx.chat.id, text);
 });
 
 bot.on("photo", async (ctx) => {
@@ -698,7 +735,8 @@ bot.on("photo", async (ctx) => {
     const mediaType =
       ext === "png" ? "image/png" : ext === "gif" ? "image/gif" : ext === "webp" ? "image/webp" : "image/jpeg";
     const caption = ctx.message.caption?.trim();
-    await submitPrompt(ctx.chat.id, caption || "What can you tell me about this image?", [
+    // Non-blocking: dispatch into the per-chat chain (see text handler).
+    submitPrompt(ctx.chat.id, caption || "What can you tell me about this image?", [
       { type: "image", data: buf.toString("base64"), mimeType: mediaType },
     ]);
   } catch (err) {
