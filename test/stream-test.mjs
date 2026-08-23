@@ -135,6 +135,43 @@ function assert(cond, label) {
   assert(finalState() === big, "all content preserved in final message state");
 }
 
+// ── Scenario G: edit hits 429 rate limit, retry eventually lands ─────────
+{
+  console.log("G) 429 rate-limit retry");
+  const calls = { send: [], edit: [] };
+  const messages = new Map();
+  let nextId = 1;
+  let editFailuresLeft = 3;
+  const bot = {
+    telegram: {
+      async sendMessage(chatId, text) {
+        const message_id = nextId++;
+        calls.send.push({ message_id, text });
+        messages.set(message_id, text);
+        return { message_id };
+      },
+      async editMessageText(chatId, message_id, _inline, text) {
+        if (editFailuresLeft > 0) {
+          editFailuresLeft--;
+          throw new Error("Too Many Requests: retry after 1");
+        }
+        calls.edit.push({ message_id, text });
+        messages.set(message_id, text);
+        return { ok: true };
+      },
+    },
+  };
+  const s = new TelegramStream(bot, 77);
+  s.append("rate limited?");
+  await sleep(1000);          // initial send
+  await s.finalize();         // edit → 429 (schedules retry)
+  await sleep(3500);          // retry #1 → 429 again
+  await sleep(3500);          // retry #2 → 429 again
+  await sleep(3500);          // retry #3 → success
+  assert([...messages.values()].join("") === "rate limited?", "final text landed after retries");
+  assert(calls.send.length >= 1 && calls.edit.length >= 1, "send + successful edit recorded");
+}
+
 if (failures === 0) {
   console.log("\nAll stream tests passed ✅");
 } else {

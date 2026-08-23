@@ -25,6 +25,8 @@ export class TelegramStream {
   private status = "…";
   private lastEditAt = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  /** Pending retry of a rate-limited edit (429). */
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private finished = false;
 
   constructor(bot: Telegraf, chatId: number) {
@@ -50,6 +52,10 @@ export class TelegramStream {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
+    }
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
     }
   }
 
@@ -103,10 +109,19 @@ export class TelegramStream {
       this.lastEditAt = Date.now();
     } catch (err) {
       // - "message is not modified" (identical content) is a no-op we can ignore.
-      // - transient errors (429 rate limits, network) are fine; the next
-      //   flush / finalize retries.
+      // - 429 rate limits: schedule a retry so the message still ends up
+      //   correct (Telegram limits how fast a single message can be edited).
       const msg = String((err as Error)?.message ?? err);
-      if (!msg.includes("message is not modified")) log(`[edit] ${msg}`);
+      if (msg.includes("message is not modified")) return;
+      log(`[edit] ${msg}`);
+      const m = /retry after (\d+)/i.exec(msg);
+      if (m && !this.retryTimer) {
+        const delayMs = Math.min(Number(m[1]) * 1000 + 1500, 30_000);
+        this.retryTimer = setTimeout(() => {
+          this.retryTimer = null;
+          void this.flush();
+        }, delayMs);
+      }
     }
   }
 
