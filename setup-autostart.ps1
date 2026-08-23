@@ -11,6 +11,7 @@
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Entry = [IO.Path]::GetFullPath((Join-Path $Root "index.ts"))
 $node = (Get-Command node).Source
 $logDir = Join-Path $Root "logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
@@ -24,14 +25,19 @@ $vbsPath = Join-Path $Root "gateway-hidden.vbs"
 $vbs = @'
 Set sh = CreateObject("WScript.Shell")
 sh.CurrentDirectory = "{ROOT}"
+rotateCode = sh.Run("{ROTATE}", 0, True)
 code = sh.Run("{CMD}", 0, True)
 WScript.Quit code
 '@
 # Build the command line, then double every quote so it embeds cleanly in VBS.
-$cmdLine = 'cmd /c "{NODE}" --env-file-if-exists=.env index.ts >> logs\gateway.log 2>&1'
-$cmdLine = $cmdLine.Replace("{NODE}", $node)
+$rotateScript = Join-Path $Root "scripts\rotate-logs.mjs"
+$rotateLine = '"{NODE}" "{ROTATE_SCRIPT}" --root "{ROOT}"'
+$rotateLine = $rotateLine.Replace("{NODE}", $node).Replace("{ROTATE_SCRIPT}", $rotateScript).Replace("{ROOT}", $Root)
+$vbsRotate = $rotateLine.Replace('"', '""')
+$cmdLine = 'cmd /c "{NODE}" --env-file-if-exists=.env "{ENTRY}" >> logs\gateway.log 2>&1'
+$cmdLine = $cmdLine.Replace("{NODE}", $node).Replace("{ENTRY}", $Entry)
 $vbsCmd = $cmdLine.Replace('"', '""')
-$vbs = $vbs.Replace("{ROOT}", $Root).Replace("{CMD}", $vbsCmd)
+$vbs = $vbs.Replace("{ROOT}", $Root).Replace("{ROTATE}", $vbsRotate).Replace("{CMD}", $vbsCmd)
 Set-Content -Path $vbsPath -Value $vbs -Encoding ASCII
 
 # ── Register the scheduled task ─────────────────────────────────────────────

@@ -18,7 +18,7 @@ config (`~/.pi/agent` auth/settings/models/extensions) as-is.
 
 ```plaintext
 Telegram user ──> telegraf long-polling ──> index.ts handlers
-                     │  (allowlist check: ALLOWED_TELEGRAM_IDS)
+                     │  (sender user allowlist: ALLOWED_TELEGRAM_IDS)
                      ▼
               ChatState (per chat id)
                      │  lazy: createAgentSession({cwd: chatCwd, sessionManager,
@@ -51,8 +51,13 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 
 | File | Responsibility |
 | --- | --- |
-| `index.ts` | entrypoint: config (.env), telegraf wiring, allowlist, commands, per-chat session hub, single-instance lock, bootstrap (ModelRuntime / DefaultResourceLoader / SettingsManager) |
+| `index.ts` | entrypoint: config (.env), telegraf wiring, user allowlist, commands, per-chat session hub, bootstrap (ModelRuntime / DefaultResourceLoader / SettingsManager) |
+| `chat-settings.ts` | creates an in-memory settings layer per Telegram chat so model/thinking changes never rewrite the owner's pi settings |
+| `history.ts` | deletes one per-chat SDK history file and deliberately propagates failure to `/new` |
+| `instance-lock.ts` | atomic, heartbeat-backed single-instance lock plus ownership metadata |
+| `session-errors.ts` | defers assistant error rendering until `agent_end` determines whether the attempt will retry |
 | `telegram-stream.ts` | `TelegramStream`: live edits, chunking >3900 chars, ~800 ms edit throttle, 429 retry (retry-after honored, cap 30 s) |
+| `scripts/rotate-logs.mjs` | archives non-empty logs before managed launches and retains 20 archives per log type |
 | `setup-autostart.ps1` | registers Windows Scheduled Task `pi-telegram-gateway` (logon start, crash-restart, hidden window via generated `gateway-hidden.vbs`) |
 | `start-gateway.ps1` / `stop.ps1` / `status.ps1` | manual start (detached), clean stop (kills leaked task tree), status overview |
 | `scripts/help.mjs` | `npm run help` cheat sheet |
@@ -65,10 +70,10 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
    `logs/`, and `node_modules/` are gitignored — keep it that way. Never add
    them to a commit, never echo the token, never commit real Telegram ids.
    When changing code, search for accidental secrets before committing.
-2. **Preserve the single-instance guarantee.** `index.ts` acquires
-   `logs/gateway.lock` (PID) at startup and refuses to run if another instance
-   is alive (`isSelftest` skips this). Do not weaken it; the scheduled task's
-   crash-restart depends on it.
+2. **Preserve the single-instance guarantee.** `index.ts` atomically acquires
+   the heartbeat lock `logs/gateway.instance.lock` and writes owner metadata to
+   `logs/gateway.lock` (`isSelftest` skips this). Do not weaken it; the scheduled
+   task's crash-restart depends on stale-lock recovery and owner-safe release.
 3. **Keep Telegram constraints enforced in `TelegramStream`:** 4096-char
    message limit (seal at 3900), throttled edits, 429 retry. Telegram has no
    patience for rapid edits; do not add unbounded edit loops.
@@ -93,7 +98,8 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 | Var | Meaning |
 | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | bot token (required; from BotFather) |
-| `ALLOWED_TELEGRAM_IDS` | comma-separated allowed ids; everyone else is blocked |
+| `ALLOWED_TELEGRAM_IDS` | comma-separated allowed **user** ids; group ids never grant group-wide access |
+| `PI_TELEGRAM_DROP_PENDING_UPDATES` | opt-in discard of updates accumulated while offline; default false |
 | `PI_TELEGRAM_CWD` | default working folder for new chats |
 | `PI_TELEGRAM_SESSIONS_DIR` | where `sessions/` lives |
 | `PI_TELEGRAM_MODEL` / `PI_TELEGRAM_THINKING` | startup model / thinking level |
@@ -119,7 +125,7 @@ Model credentials come from `~/.pi/agent/` — never embed keys in code.
     (background via scheduled task, hidden window, crash-restart) /
     `npm run stop` / `npm run status`.
   - gateway runs detached via Task Scheduler; logs to `logs/gateway.log`;
-    `logs/archive/` keeps rotated pre-restart logs.
+    `logs/archive/` keeps the newest 20 rotated pre-launch logs per log type.
   - `git pull` from upstream is fine but review diffs — the gateway holds
     shell access to the machine (public repo; supply-chain caution).
 - Runs on Windows (paths, PowerShell scripts); keep cross-platform where free,

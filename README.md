@@ -46,7 +46,7 @@ npm start
 
 ```env
 TELEGRAM_BOT_TOKEN=123456:ABC...     # from @BotFather
-ALLOWED_TELEGRAM_IDS=123456789       # your Telegram numeric id(s), comma separated
+ALLOWED_TELEGRAM_IDS=123456789       # your Telegram user id(s), comma separated
 ```
 
 **Don't know your Telegram id?** Start the gateway, send `/start` to your bot —
@@ -80,7 +80,7 @@ The bot's command menu (`/` button) is synced automatically at startup via
 | Env var | Default | Meaning |
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | – (required) | bot token |
-| `ALLOWED_TELEGRAM_IDS` | – (recommended) | comma-separated ids allowed to chat; blocks everyone until set |
+| `ALLOWED_TELEGRAM_IDS` | – (recommended) | comma-separated **user** ids allowed to chat; every group sender is checked individually; blocks everyone until set |
 | `PI_TELEGRAM_CWD` | launch dir | default working folder for new chats (`/cd` overrides per chat) |
 | `PI_TELEGRAM_SESSIONS_DIR` | `./sessions` | where per-chat history is stored |
 | `PI_TELEGRAM_MODEL` | session default | default model, e.g. `openai/gpt-5:medium` (pi `--model` syntax) |
@@ -88,6 +88,7 @@ The bot's command menu (`/` button) is synced automatically at startup via
 | `PI_TELEGRAM_APPEND_PROMPT` | – | extra instructions appended to the system prompt |
 | `TELEGRAM_PROXY` | – | HTTP(S) proxy for Telegram API calls (also honors `HTTPS_PROXY`/`HTTP_PROXY`) |
 | `PI_TELEGRAM_IPV4_ONLY` | `false` | IPv4-first DNS + IPv4-only Telegram agent; enable only if broken IPv6 stalls calls (node-fetch v2 has no happy-eyeballs) |
+| `PI_TELEGRAM_DROP_PENDING_UPDATES` | `false` | discard updates received while the gateway was offline; opt in only when abandoning that backlog intentionally |
 
 ## 🪟 Autostart (Windows)
 
@@ -108,10 +109,13 @@ schtasks /Delete /TN "pi-telegram-gateway" /F
 ```
 
 The task runs the gateway in the foreground (logs to `logs/gateway.log`) so
-Task Scheduler restarts it 1 minute after a crash. The gateway holds a
-single-instance lock (`logs/gateway.lock`) so a manual `npm start` can never
-run a second, conflicting poller. Re-run `setup-autostart.ps1` after moving the
-repo or upgrading Node (it pins the Node path at setup time).
+Task Scheduler restarts it 1 minute after a crash. The gateway holds an atomic,
+heartbeat-backed single-instance lock (`logs/gateway.instance.lock`, with
+owner metadata in `logs/gateway.lock`) so a manual `npm start` cannot run a
+second, conflicting poller. Re-run `setup-autostart.ps1` after moving the repo
+or upgrading Node (it pins the Node and repository paths at setup time).
+Before each managed launch, non-empty logs are moved into `logs/archive/`; the
+newest 20 archives are retained for each log type.
 
 ## 🗃️ Sessions & working folders
 
@@ -131,9 +135,10 @@ machine — including the shell. Read this.
 **Access is gated by two independent secrets, both outside this repository:**
 
 1. **Bot token** — without it, nothing can speak to Telegram as your bot.
-2. **Allowlist** (`ALLOWED_TELEGRAM_IDS`) — the gateway only answers messages
-   from those Telegram ids. A leaked token *alone* is not enough: an attacker
-   would also need to send messages from one of your allowed accounts.
+2. **User allowlist** (`ALLOWED_TELEGRAM_IDS`) — the gateway only answers
+   senders with those Telegram user ids, including inside groups. A group id
+   never grants access to every member. A leaked token *alone* is not enough:
+   an attacker would also need one of your allowed accounts.
 
 **What is *not* in this repository:** your bot token (`.env`), per-chat
 conversation history (`sessions/`), or your pi model credentials
@@ -146,7 +151,7 @@ That holds for any software you run from git.
 
 **Recommendations:**
 
-- Never set `ALLOWED_TELEGRAM_IDS=*` — it disables the only real gate.
+- Add only trusted numeric user ids. `*` is not supported and blocks everyone.
 - Don't `git pull` blindly; review the diff (or pin to a commit hash).
 - Don't add collaborators you don't trust; keep 2FA on your GitHub account.
 - If you add an auto-update feature, pin by signed tag or commit hash.
@@ -156,7 +161,7 @@ That holds for any software you run from git.
 ## 🔬 Development
 
 ```bash
-npm test          # offline unit tests: stream chunking + /cd cwd-override
+npm test          # offline tests: stream, /cd, settings isolation, instance lock
 npm run selftest  # create a session and run one prompt (no Telegram bot needed)
 npm run typecheck # tsc --noEmit
 node test/commands-scope.mjs  # inspect the bot's per-scope command menus
@@ -166,7 +171,12 @@ Layout:
 
 ```plaintext
 index.ts             bot wiring, session hub, commands
+chat-settings.ts     isolated per-chat pi settings
+history.ts           failure-aware per-chat history removal
+instance-lock.ts     atomic heartbeat-backed process lock
+session-errors.ts    terminal-vs-retry model error buffering
 telegram-stream.ts   live streaming + chunking into editable messages
+scripts/rotate-logs.mjs  bounded pre-launch log rotation
 test/                offline tests
 sessions/            per-chat session files (gitignored)
 ```

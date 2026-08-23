@@ -14,11 +14,21 @@ schtasks /Query /TN "pi-telegram-gateway" /V /FO LIST |
 
 Write-Host "== Gateway process =="
 if (Test-Path $lock) {
-  $gpid = Get-Content $lock
+  $rawLock = Get-Content -LiteralPath $lock -Raw
+  try {
+    $record = $rawLock | ConvertFrom-Json
+    $gpid = [int]$record.pid
+    $entry = [string]$record.entry
+  } catch {
+    # Backward-compatible display for the former PID-only lock format.
+    $gpid = [int]$rawLock
+    $entry = "(legacy lock metadata)"
+  }
   $p = Get-Process -Id $gpid -ErrorAction SilentlyContinue
   if ($p) {
     $win = if ($p.MainWindowHandle -eq 0) { "hidden" } else { "VISIBLE" }
     Write-Host "  PID $gpid running ($($p.ProcessName)), started $($p.StartTime), window: $win"
+    Write-Host "  entry: $entry"
   } else {
     Write-Host "  PID $gpid is NOT running (stale lock, will be reclaimed on next start)"
   }

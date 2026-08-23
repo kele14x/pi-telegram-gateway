@@ -18,6 +18,8 @@ import type { Telegraf } from "telegraf";
 
 const MAX_CHUNK = 3900; // Telegram hard limit is 4096 chars
 const EDIT_MIN_INTERVAL_MS = 800;
+const MAX_DELIVERY_ATTEMPTS = 4;
+const TRANSIENT_RETRY_BASE_MS = 500;
 
 function log(...args: unknown[]) {
   console.log(new Date().toISOString(), ...args);
@@ -36,6 +38,44 @@ interface DeliveryOp {
   version: number;
 }
 
+function retryAfterSeconds(err: unknown): number | undefined {
+  const response = (err as { response?: { parameters?: { retry_after?: unknown } } })?.response;
+  const value = response?.parameters?.retry_after;
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
+  const match = /retry after (\d+)/i.exec(String((err as Error)?.message ?? err));
+  return match ? Number(match[1]) : undefined;
+}
+
+function errorStatus(err: unknown): number | undefined {
+  const candidate = err as {
+    response?: { error_code?: unknown; status?: unknown; statusCode?: unknown };
+    status?: unknown;
+    statusCode?: unknown;
+  };
+  for (const value of [candidate?.response?.error_code, candidate?.response?.status, candidate?.response?.statusCode, candidate?.status, candidate?.statusCode]) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return undefined;
+}
+
+function isRetryableDeliveryError(err: unknown): boolean {
+  if (retryAfterSeconds(err) !== undefined) return true;
+  const status = errorStatus(err);
+  if (status !== undefined) return status === 429 || status >= 500;
+  const code = String((err as NodeJS.ErrnoException)?.code ?? "").toUpperCase();
+  if (["ECONNRESET", "ECONNREFUSED", "EPIPE", "ETIMEDOUT", "EAI_AGAIN", "ENETUNREACH", "ENOTFOUND"].includes(code)) {
+    return true;
+  }
+  // Errors without an HTTP/API status are normally transport/proxy failures.
+  // Retry them within the same strict bound; known Telegram 4xx errors above
+  // still fail immediately.
+  return status === undefined;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+}
+
 export class TelegramStream {
   private bot: Telegraf;
   private chatId: number;
@@ -45,9 +85,8 @@ export class TelegramStream {
   private status = "…";
   private lastEditAt = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
-  /** Pending retries of rate-limited edits (429). */
-  private retryOps: DeliveryOp[] = [];
-  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Terminal failures, keyed by the exact segment content version. */
+  private deliveryFailures = new Map<Segment, number>();
   private finished = false;
   /** A canceled stream must not deliver operations planned before replacement. */
   private canceled = false;
@@ -80,12 +119,11 @@ export class TelegramStream {
     this.segments = [{ text: "", msgId: null, version: 0 }];
     this.status = "…";
     this.lastEditAt = 0;
+    this.deliveryFailures.clear();
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    // A pending retry targets its own captured segment and may safely outlive
-    // this reset. cancel() is used when the whole stream is being replaced.
   }
 
   /** Stop future delivery for this stream, retaining already in-flight calls. */
@@ -94,14 +132,10 @@ export class TelegramStream {
     this.finished = true;
     this.canceled = true;
     this.pending = "";
-    this.retryOps = [];
+    this.deliveryFailures.clear();
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
-    }
-    if (this.retryTimer) {
-      clearTimeout(this.retryTimer);
-      this.retryTimer = null;
     }
   }
 
@@ -116,6 +150,9 @@ export class TelegramStream {
 
   append(delta: string) {
     if (this.finished || this.canceled || !delta) return;
+    // The initial "thinking" status is no longer useful once real answer text
+    // exists. This also avoids a stray status-only message at exactly 3900 chars.
+    this.status = "…";
     this.pending += delta;
     // Move pending into segments immediately; full segments are sealed here so
     // their text is never clipped by Telegram's 4096-char message limit.
@@ -153,34 +190,36 @@ export class TelegramStream {
       // A newer append/status/finalize has superseded this delivery operation.
       if (this.canceled || version !== seg.version || !text) return;
       const clipped = text.slice(0, 4096);
-      try {
-        if (seg.msgId === null) {
-          const sent = await this.bot.telegram.sendMessage(this.chatId, clipped);
-          seg.msgId = sent.message_id;
-        } else {
-          await this.bot.telegram.editMessageText(this.chatId, seg.msgId, undefined, clipped);
-        }
-        this.lastEditAt = Date.now();
-      } catch (err) {
-        // - "message is not modified" (identical content) is a no-op.
-        // - 429 rate limits: retry this exact operation, unless a newer
-        //   version has superseded it before the retry runs.
-        const msg = String((err as Error)?.message ?? err);
-        if (msg.includes("message is not modified")) return;
-        log(`[edit] ${msg}`);
-        const m = /retry after (\d+)/i.exec(msg);
-        if (m && !this.canceled && version === seg.version) {
-          this.retryOps.push({ seg, text, version });
-          if (!this.retryTimer) {
-            const delayMs = Math.min(Number(m[1]) * 1000 + 1500, 30_000);
-            this.retryTimer = setTimeout(() => {
-              this.retryTimer = null;
-              const ops = this.retryOps.splice(0);
-              for (const retry of ops) {
-                void this.editOrSend(retry.seg, retry.text, retry.version);
-              }
-            }, delayMs);
+      for (let attempt = 1; attempt <= MAX_DELIVERY_ATTEMPTS; attempt++) {
+        if (this.canceled || version !== seg.version) return;
+        try {
+          if (seg.msgId === null) {
+            const sent = await this.bot.telegram.sendMessage(this.chatId, clipped);
+            seg.msgId = sent.message_id;
+          } else {
+            await this.bot.telegram.editMessageText(this.chatId, seg.msgId, undefined, clipped);
           }
+          this.lastEditAt = Date.now();
+          this.deliveryFailures.delete(seg);
+          return;
+        } catch (err) {
+          const msg = String((err as Error)?.message ?? err);
+          if (msg.includes("message is not modified")) {
+            this.deliveryFailures.delete(seg);
+            return;
+          }
+          const retryable = isRetryableDeliveryError(err);
+          if (!retryable || attempt === MAX_DELIVERY_ATTEMPTS) {
+            if (!this.canceled && version === seg.version) this.deliveryFailures.set(seg, version);
+            log(`[edit] delivery failed after ${attempt} attempt${attempt === 1 ? "" : "s"}: ${msg}`);
+            return;
+          }
+          const retryAfter = retryAfterSeconds(err);
+          const delayMs = retryAfter === undefined
+            ? Math.min(TRANSIENT_RETRY_BASE_MS * 2 ** (attempt - 1), 30_000)
+            : Math.min(retryAfter * 1000 + 250, 30_000);
+          log(`[edit] attempt ${attempt}/${MAX_DELIVERY_ATTEMPTS} failed: ${msg}; retrying in ${delayMs}ms`);
+          await delay(delayMs);
         }
       }
     });
@@ -246,10 +285,11 @@ export class TelegramStream {
     // Plan the entire delivery against the snapshot, then drain it through the
     // serialized I/O chain.
     const ops: DeliveryOp[] = [];
-    // Post any sealed segments that never got a message.
+    // Reconcile every sealed segment, including one whose final edit failed
+    // after an earlier partial version had already received a message id.
     for (let i = 0; i < segs.length - 1; i++) {
       const seg = segs[i];
-      if (seg.msgId === null) ops.push({ seg, text: seg.text, version: seg.version });
+      ops.push({ seg, text: seg.text, version: seg.version });
     }
 
     let seg = segs[segs.length - 1];
@@ -284,5 +324,8 @@ export class TelegramStream {
     for (const op of ops) void this.editOrSend(op.seg, op.text, op.version);
     // Resolve once everything planned above has executed.
     await this.ioChain;
+    if (ops.some((op) => this.deliveryFailures.get(op.seg) === op.version)) {
+      throw new Error("Telegram delivery failed after retries");
+    }
   }
 }

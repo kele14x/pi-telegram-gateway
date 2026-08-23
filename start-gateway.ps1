@@ -5,18 +5,22 @@
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Entry = [IO.Path]::GetFullPath((Join-Path $Root "index.ts"))
 $LogDir = Join-Path $Root "logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
-# Stop any existing gateway instance (npm wrapper or node index.ts)
-Get-CimInstance Win32_Process -Filter "name='node.exe'" |
-  Where-Object { $_.CommandLine -like '*index.ts*' -or $_.CommandLine -like '*npm-cli*start*' } |
-  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+# Stop only the instance owned by this repository. stop.ps1 validates the
+# absolute entry path and lock metadata before terminating a process tree.
+& (Join-Path $Root "stop.ps1") | Out-Null
 Start-Sleep -Seconds 1
 
 $node = (Get-Command node).Source
+& $node (Join-Path $Root "scripts\rotate-logs.mjs") --root $Root
+if ($LASTEXITCODE -ne 0) {
+  Write-Warning "Log rotation failed; starting the gateway without rotating."
+}
 $proc = Start-Process -FilePath $node `
-  -ArgumentList '--env-file-if-exists=.env', 'index.ts' `
+  -ArgumentList '--env-file-if-exists=.env', ('"{0}"' -f $Entry) `
   -WorkingDirectory $Root `
   -RedirectStandardOutput (Join-Path $LogDir "gateway.log") `
   -RedirectStandardError  (Join-Path $LogDir "gateway-err.log") `

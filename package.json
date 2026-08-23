@@ -12,7 +12,7 @@
     "start:daemon": "schtasks /Run /TN pi-telegram-gateway",
     "stop": "powershell -NoProfile -ExecutionPolicy Bypass -File stop.ps1",
     "selftest": "node --env-file-if-exists=.env index.ts --selftest",
-    "test": "node test/stream-test.mjs && node test/cd-test.mjs",
+    "test": "node test/stream-test.mjs && node test/cd-test.mjs && node test/settings-test.mjs && node test/lock-test.mjs && node test/residual-test.mjs && node test/rotation-test.mjs",
     "status": "powershell -NoProfile -ExecutionPolicy Bypass -File status.ps1",
     "help": "node scripts/help.mjs",
     "typecheck": "tsc --noEmit"
@@ -21,6 +21,7 @@
     "@earendil-works/pi-ai": "^0.84.2",
     "@earendil-works/pi-coding-agent": "^0.84.2",
     "https-proxy-agent": "^9.1.0",
+    "proper-lockfile": "^4.1.2",
     "telegraf": "^4.16.3"
   },
   "devDependencies": {

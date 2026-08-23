@@ -11,11 +11,11 @@
  */
 
 import { mkdirSync, mkdtempSync, renameSync, rmSync, readFileSync, writeFileSync, statSync } from "node:fs";
-import { join, resolve, sep, dirname } from "node:path";
+import { join, resolve, sep } from "node:path";
 import process from "node:process";
 import dns from "node:dns";
 import os from "node:os";
-import { Agent as NodeHttpsAgent } from "node:https";
+import { Agent as NodeHttpsAgent, get as httpsGet } from "node:https";
 import type { LookupFunction } from "node:net";
 
 // IPv4-only networking is opt-in via PI_TELEGRAM_IPV4_ONLY=true: on networks
@@ -23,6 +23,9 @@ import type { LookupFunction } from "node:net";
 // (telegraf) has no happy-eyeballs and can stall on the v6 attempt.
 const IPV4_ONLY = ["1", "true", "yes", "on"].includes(
   (process.env.PI_TELEGRAM_IPV4_ONLY ?? "").trim().toLowerCase(),
+);
+const DROP_PENDING_UPDATES = ["1", "true", "yes", "on"].includes(
+  (process.env.PI_TELEGRAM_DROP_PENDING_UPDATES ?? "").trim().toLowerCase(),
 );
 if (IPV4_ONLY) dns.setDefaultResultOrder("ipv4first");
 
@@ -46,35 +49,31 @@ import {
   SettingsManager,
   type AgentSession,
   type AgentSessionEvent,
+  type PromptOptions,
 } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
+import { createChatSettingsManager } from "./chat-settings.ts";
+import { removeChatHistory } from "./history.ts";
+import { acquireInstanceLock, type InstanceLock } from "./instance-lock.ts";
+import { SessionErrorBuffer } from "./session-errors.ts";
 import { TelegramStream } from "./telegram-stream.ts";
 
 // ── Single-instance lock ────────────────────────────────────────────────────
 // Prevents a duplicate gateway (e.g. Task Scheduler restart racing a manual
 // start) from polling the same bot and stealing updates.
-const LOCK_FILE = join(import.meta.dirname, "logs", "gateway.lock");
+const LOCK_DIR = join(import.meta.dirname, "logs");
+const LOCK_TARGET = join(LOCK_DIR, "gateway.instance");
+const LOCK_FILE = join(LOCK_DIR, "gateway.lock");
+const ENTRY_FILE = join(import.meta.dirname, "index.ts");
+let instanceLock: InstanceLock | null = null;
 function acquireLock(): boolean {
-  try {
-    const pid = Number(readFileSync(LOCK_FILE, "utf8"));
-    if (Number.isFinite(pid)) {
-      try {
-        process.kill(pid, 0); // throws if the pid is gone
-        return false; // another gateway is alive
-      } catch {
-        /* stale lock from a crashed process — take over */
-      }
-    }
-  } catch {
-    /* no lock file yet */
-  }
-  mkdirSync(dirname(LOCK_FILE), { recursive: true });
-  writeFileSync(LOCK_FILE, String(process.pid));
-  return true;
+  instanceLock = acquireInstanceLock(LOCK_TARGET, LOCK_FILE, ENTRY_FILE);
+  return instanceLock !== null;
 }
 function releaseLock() {
   try {
-    rmSync(LOCK_FILE, { force: true });
+    instanceLock?.release();
+    instanceLock = null;
   } catch {
     /* ignore */
   }
@@ -84,7 +83,7 @@ function releaseLock() {
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
 
-const ALLOWED_IDS = new Set(
+const ALLOWED_USER_IDS = new Set(
   (process.env.ALLOWED_TELEGRAM_IDS ?? "")
     .split(",")
     .map((s) => s.trim())
@@ -169,13 +168,15 @@ interface ChatState {
   chain: Promise<void>;
   /** Bumped by lifecycle/cancellation commands to invalidate old jobs. */
   generation: number;
+  /** Aborts asynchronous preflight work owned by the current generation. */
+  generationController: AbortController;
   /** In-flight session creation — dedupes concurrent getChatSession() calls. */
   sessionInit: Promise<AgentSession | undefined> | null;
   /** Session replacement in progress; new jobs wait for it before creating a session. */
   sessionReset: Promise<void> | null;
   /** Jobs currently executing; queued jobs are not included until they start. */
   running: Set<Promise<void>>;
-  /** Prompt jobs currently executing (drives the immediate "queued" ack). */
+  /** Prompt jobs reserved in the chain (drives the immediate "queued" ack). */
   busy: number;
 }
 
@@ -195,17 +196,10 @@ function assertValidConfig() {
     for (const p of problems) console.error(`✖ ${p}`);
     throw new Error("Configuration error");
   }
-  if (ALLOWED_IDS.size === 0) {
+  if (ALLOWED_USER_IDS.size === 0) {
     console.warn("⚠ ALLOWED_TELEGRAM_IDS is not set — the bot will refuse everyone until configured.");
     console.warn("  Send /start to your bot; the gateway logs your numeric id, then add it to .env and restart.");
   }
-}
-
-function getErrorMessage(msg: unknown): string | undefined {
-  const m = msg as { errorMessage?: string; stopReason?: string };
-  if (m?.errorMessage) return m.errorMessage;
-  if (m?.stopReason === "error") return "The model returned an error. Check the gateway console for details.";
-  return undefined;
 }
 
 function expandHome(p: string): string {
@@ -236,7 +230,9 @@ async function createChatSession(chatId: number, cwd: string, sessionsDir = SESS
     cwd,
     agentDir: AGENT_DIR,
     modelRuntime,
-    settingsManager,
+    // A chat may change its model/thinking level without rewriting the
+    // owner's global pi settings or affecting another Telegram chat.
+    settingsManager: createChatSettingsManager(settingsManager),
     resourceLoader: loader,
     sessionManager: sm,
     model,
@@ -246,9 +242,11 @@ async function createChatSession(chatId: number, cwd: string, sessionsDir = SESS
 }
 
 function wireSession(chatId: number, session: AgentSession, stream: TelegramStream) {
+  const errors = new SessionErrorBuffer();
   session.subscribe((event: AgentSessionEvent) => {
     switch (event.type) {
       case "agent_start": {
+        errors.beginAttempt();
         stream.reset();
         stream.setStatus("⏳ thinking…");
         break;
@@ -263,8 +261,7 @@ function wireSession(chatId: number, session: AgentSession, stream: TelegramStre
         break;
       }
       case "message_end": {
-        const err = getErrorMessage(event.message);
-        if (err) stream.append(`\n\n⚠️ ${err}`);
+        errors.capture(event.message);
         if ((event.message as { stopReason?: string }).stopReason === "aborted") {
           stream.setStatus("🛑 aborted");
         }
@@ -285,8 +282,26 @@ function wireSession(chatId: number, session: AgentSession, stream: TelegramStre
         break;
       }
       case "agent_end": {
-        if (!event.willRetry) void stream.finalize();
+        const terminalError = errors.finishAttempt(event.willRetry);
+        if (!event.willRetry) {
+          if (terminalError) stream.append(`\n\n⚠️ ${terminalError}`);
+          void stream.finalize().catch(async (err) => {
+            log(`[chat ${chatId}] final response delivery failed: ${String((err as Error)?.message ?? err)}`);
+            await safeSend(chatId, "⚠️ The final response could not be delivered after several retries.");
+          });
+        }
         else stream.setStatus("⏳ retrying…");
+        break;
+      }
+      case "auto_retry_end": {
+        // If /stop cancels the SDK during its retry backoff, there is no later
+        // agent_end event. Finalize the status-only stream in that narrow case.
+        if (!event.success && event.finalError === "Retry cancelled") {
+          stream.setStatus("🛑 aborted");
+          void stream.finalize().catch((err) => {
+            log(`[chat ${chatId}] aborted response delivery failed: ${String((err as Error)?.message ?? err)}`);
+          });
+        }
         break;
       }
       case "compaction_end": {
@@ -307,6 +322,7 @@ function ensureChat(chatId: number): ChatState {
       stream: null,
       chain: Promise.resolve(),
       generation: 0,
+      generationController: new AbortController(),
       sessionInit: null,
       sessionReset: null,
       running: new Set(),
@@ -319,6 +335,30 @@ function ensureChat(chatId: number): ChatState {
 
 function isCurrentChat(st: ChatState, generation: number): boolean {
   return chats.get(st.chatId) === st && st.generation === generation;
+}
+
+function advanceChatGeneration(st: ChatState) {
+  st.generationController.abort();
+  st.generation++;
+  st.generationController = new AbortController();
+}
+
+function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new ChatOperationCancelled());
+  return new Promise<T>((resolvePromise, rejectPromise) => {
+    const cancel = () => rejectPromise(new ChatOperationCancelled());
+    signal.addEventListener("abort", cancel, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", cancel);
+        resolvePromise(value);
+      },
+      (err) => {
+        signal.removeEventListener("abort", cancel);
+        rejectPromise(err);
+      },
+    );
+  });
 }
 
 async function getChatSession(
@@ -407,21 +447,21 @@ function replaceChatSession(st: ChatState, removeHistory: boolean): Promise<void
       }
     }
     if (removeHistory) {
-      try {
-        rmSync(join(SESSIONS_DIR, `chat-${st.chatId}.jsonl`), { force: true });
-      } catch (err) {
-        log(`[session] history removal failed: ${String((err as Error)?.message ?? err)}`);
-      }
+      removeChatHistory(SESSIONS_DIR, st.chatId);
     }
   });
-  const tracked = reset.catch((err) => {
+  const result = reset.catch((err) => {
     log(`[session] replacement failed: ${String((err as Error)?.message ?? err)}`);
+    throw err;
   });
-  st.sessionReset = tracked;
-  void tracked.then(() => {
-    if (st.sessionReset === tracked) st.sessionReset = null;
+  // The gate must always settle successfully so later prompts can reopen the
+  // retained history. The returned result still rejects for truthful command UI.
+  const gate = result.catch(() => {});
+  st.sessionReset = gate;
+  void gate.then(() => {
+    if (st.sessionReset === gate) st.sessionReset = null;
   });
-  return tracked;
+  return result;
 }
 
 /** Enqueue a job and track only the job currently executing. */
@@ -448,25 +488,42 @@ function enqueueChatJob(st: ChatState, fn: () => Promise<void>): Promise<void> {
 function submitPrompt(
   chatId: number,
   text: string,
-  images?: ImageContent[],
+  images?: ImageContent[] | Promise<ImageContent[]>,
   expectedState?: ChatState,
   expectedGeneration?: number,
 ) {
   const st = expectedState ?? ensureChat(chatId);
   const gen = expectedGeneration ?? st.generation;
   if (!isCurrentChat(st, gen)) return;
+  const signal = st.generationController.signal;
+  // Attach the rejection handler now: a queued photo download may fail before
+  // its chain job starts, and must never become an unhandled rejection.
+  const imageLoad = Promise.resolve(images ?? []).then(
+    (value) => ({ ok: true as const, value }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
   if (st.busy > 0) {
     // Immediate acknowledgment so the user knows their message is queued.
     void safeSend(chatId, `📥 Queued (after current task): “${text.slice(0, 60)}…”`);
   }
+  // Reserve the chain position synchronously. In particular, a photo keeps
+  // its arrival order while Telegram file download happens in the background.
+  st.busy++;
   enqueueChatJob(st, async () => {
-    st.busy++;
     try {
       // Cancelled while still queued (e.g. /stop, /new, or /cd landed meanwhile).
       if (!isCurrentChat(st, gen)) {
         log(`[chat ${chatId}] dropped queued message after cancellation`);
         return;
       }
+      const loaded = await abortable(imageLoad, signal);
+      if (!loaded.ok) {
+        const msg = loaded.error instanceof Error ? loaded.error.message : String(loaded.error);
+        log(`[chat ${chatId}] photo preparation failed: ${msg}`);
+        if (isCurrentChat(st, gen)) await safeSend(chatId, `⚠️ Couldn't process the photo: ${msg}`);
+        return;
+      }
+      if (!isCurrentChat(st, gen)) return;
       let session: AgentSession;
       try {
         session = await getChatSession(chatId, st, gen);
@@ -488,14 +545,25 @@ function submitPrompt(
         return;
       }
       try {
-        if (session.isStreaming) {
-          await session.prompt(text, { images, streamingBehavior: "followUp" });
-        } else {
-          await session.prompt(text, { images });
-        }
+        const options: PromptOptions = {
+          images: loaded.value,
+          preflightResult: (accepted) => {
+            // The SDK invokes this synchronously after async prompt preflight
+            // and immediately before starting the agent. Throwing here closes
+            // the last cancellation gap for /stop, /new, and /cd.
+            if (accepted && !isCurrentChat(st, gen)) throw new ChatOperationCancelled();
+          },
+        };
+        if (session.isStreaming) options.streamingBehavior = "followUp";
+        await session.prompt(text, options);
         // A cancellation may have raced with prompt preflight/queueing.
         if (!isCurrentChat(st, gen)) session.clearQueue();
       } catch (err) {
+        if (err instanceof ChatOperationCancelled) {
+          session.clearQueue();
+          log(`[chat ${chatId}] dropped prompt during cancellation preflight`);
+          return;
+        }
         const msg = err instanceof Error ? err.message : String(err);
         log(`[chat ${chatId}] prompt error: ${msg}`);
         await safeSend(chatId, `⚠️ ${msg}`);
@@ -503,6 +571,9 @@ function submitPrompt(
     } finally {
       st.busy--;
     }
+  }).catch((err) => {
+    if (err instanceof ChatOperationCancelled) return;
+    log(`[chat ${chatId}] queued prompt failed: ${String((err as Error)?.message ?? err)}`);
   });
 }
 
@@ -554,23 +625,26 @@ async function withRetry<T>(
 
 // ═════════════════════════════ Telegram bot ═══════════════════════════════
 
-// All long-running work is dispatched in the background, so Telegraf's
-// handler timeout cannot abort a prompt or a queued per-chat operation. Keep
-// this infinite as a guard against a false timeout if a handler later grows an
-// additional asynchronous step.
+// All agent work is dispatched in the background. Keep a finite ceiling so a
+// future accidentally-blocking handler cannot stall Telegraf's update batch
+// until the Telegram client request itself times out.
 const botOptions: NonNullable<ConstructorParameters<typeof Telegraf>[1]> = {
-  handlerTimeout: Infinity,
+  handlerTimeout: 60_000,
 };
-if (PROXY_URL) botOptions.telegram = { agent: new HttpsProxyAgent(PROXY_URL) };
-else if (IPV4_ONLY) botOptions.telegram = { agent: new NodeHttpsAgent({ lookup: ipv4Lookup }) };
+const telegramAgent = PROXY_URL
+  ? new HttpsProxyAgent(PROXY_URL, IPV4_ONLY ? { lookup: ipv4Lookup } : undefined)
+  : IPV4_ONLY
+    ? new NodeHttpsAgent({ lookup: ipv4Lookup })
+    : undefined;
+if (telegramAgent) botOptions.telegram = { agent: telegramAgent };
 
 const bot = new Telegraf(BOT_TOKEN, botOptions);
 
-/** Access guard: only allowlisted users/chats may talk to the agent. */
+/** Access guard: only explicitly allowlisted users may talk to the agent. */
 bot.use(async (ctx, next) => {
   const fromId = ctx.from?.id ?? -1;
   const chatId = ctx.chat?.id ?? -1;
-  if (ALLOWED_IDS.has(fromId) || ALLOWED_IDS.has(chatId)) return next();
+  if (ALLOWED_USER_IDS.has(fromId)) return next();
   log(`blocked message from ${ctx.from?.username ?? fromId} (chat ${chatId})`);
   if (ctx.message || ctx.callbackQuery) {
     await ctx
@@ -616,19 +690,31 @@ bot.command("new", async (ctx) => {
   if (st) {
     // Invalidate old jobs synchronously, then replace the session in the
     // background. New jobs on this state wait for sessionReset to finish.
-    st.generation++;
+    advanceChatGeneration(st);
     st.session?.clearQueue();
-    void replaceChatSession(st, true);
+    void replaceChatSession(st, true).then(
+      () => ctx.reply("🧹 Fresh session started (working folder kept). Send me anything to begin.").catch(() => {}),
+      (err) => {
+        // Drop messages submitted after /new but before its failed deletion was
+        // discovered; they must not silently resume the retained history.
+        advanceChatGeneration(st);
+        st.session?.clearQueue();
+        log(`[new] history removal failed: ${String((err as Error)?.message ?? err)}`);
+        return ctx.reply("⚠️ Couldn't clear the saved conversation. Its history was kept; please check the gateway log and try again.").catch(() => {});
+      },
+    );
   } else {
     // After a restart there is no ChatState, but the persisted history still
     // needs to be removed.
     try {
-      rmSync(join(SESSIONS_DIR, `chat-${chatId}.jsonl`), { force: true });
+      removeChatHistory(SESSIONS_DIR, chatId);
     } catch (err) {
       log(`[new] history removal failed: ${String((err as Error)?.message ?? err)}`);
+      await ctx.reply("⚠️ Couldn't clear the saved conversation. Its history was kept; please check the gateway log and try again.").catch(() => {});
+      return;
     }
+    await ctx.reply("🧹 Fresh session started (working folder kept). Send me anything to begin.");
   }
-  await ctx.reply("🧹 Fresh session started (working folder kept). Send me anything to begin.");
 });
 
 bot.command("model", async (ctx) => {
@@ -711,7 +797,7 @@ bot.command("stop", async (ctx) => {
   // Cancel-all semantics: bump the generation so queued st.chain submissions
   // are dropped too (the SDK queue is cleared separately — it would otherwise
   // drain via continue() after the abort).
-  st.generation++;
+  advanceChatGeneration(st);
   const session = st.session;
   session?.clearQueue();
   // Abort is deliberately not awaited: the update handler must return so
@@ -764,7 +850,7 @@ bot.command("cd", async (ctx) => {
   const persisted = saveChatMeta(ctx.chat.id, target);
   // Invalidate queued submissions and any in-flight session creation, so
   // nothing from the old folder runs after the switch.
-  st.generation++;
+  advanceChatGeneration(st);
   st.session?.clearQueue();
   void replaceChatSession(st, false);
   log(`[chat ${ctx.chat.id}] cwd -> ${target}`);
@@ -833,37 +919,102 @@ bot.on("text", async (ctx) => {
   submitPrompt(ctx.chat.id, text);
 });
 
+const MAX_PHOTO_BYTES = 20 * 1024 * 1024;
+
+function downloadTelegramFile(
+  url: string,
+  signal: AbortSignal,
+  redirectsRemaining = 3,
+): Promise<{ data: Buffer; contentType?: string }> {
+  return new Promise((resolveDownload, rejectDownload) => {
+    let settled = false;
+    const fail = (err: unknown) => {
+      if (settled) return;
+      settled = true;
+      rejectDownload(err);
+    };
+    const request = httpsGet(url, { agent: telegramAgent, signal }, (response) => {
+      const status = response.statusCode ?? 0;
+      if (status >= 300 && status < 400 && response.headers.location) {
+        response.resume();
+        if (redirectsRemaining <= 0) {
+          fail(new Error("too many redirects while downloading photo"));
+          return;
+        }
+        const redirected = new URL(response.headers.location, url).href;
+        void downloadTelegramFile(redirected, signal, redirectsRemaining - 1).then(
+          (value) => {
+            if (settled) return;
+            settled = true;
+            resolveDownload(value);
+          },
+          fail,
+        );
+        return;
+      }
+      if (status < 200 || status >= 300) {
+        response.resume();
+        fail(new Error(`download failed: ${status}`));
+        return;
+      }
+      const declaredSize = Number(response.headers["content-length"] ?? 0);
+      if (Number.isFinite(declaredSize) && declaredSize > MAX_PHOTO_BYTES) {
+        response.resume();
+        fail(new Error("photo is larger than 20 MiB"));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      response.on("data", (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > MAX_PHOTO_BYTES) {
+          request.destroy(new Error("photo is larger than 20 MiB"));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.on("error", fail);
+      response.on("end", () => {
+        if (settled) return;
+        settled = true;
+        const header = response.headers["content-type"];
+        resolveDownload({
+          data: Buffer.concat(chunks),
+          contentType: (Array.isArray(header) ? header[0] : header)?.split(";", 1)[0]?.trim().toLowerCase(),
+        });
+      });
+    });
+    request.setTimeout(30_000, () => request.destroy(new Error("photo download timed out")));
+    request.on("error", fail);
+  });
+}
+
 bot.on("photo", (ctx) => {
-  // Capture the chat generation before starting the background download. If
-  // /new, /cd, or /stop lands while it is downloading, the photo is dropped
-  // rather than being submitted into the newer conversation.
+  // Reserve the prompt position immediately, while the file download proceeds
+  // asynchronously. Later updates for this chat cannot overtake the photo.
   const st = ensureChat(ctx.chat.id);
   const generation = st.generation;
-  // Do the download in the background as well; a stalled Telegram file
-  // request must not block polling or delay /stop for other updates.
-  void (async () => {
-    try {
-      const photo = ctx.message.photo![ctx.message.photo!.length - 1];
-      const link = await ctx.telegram.getFileLink(photo.file_id);
-      const href = typeof link === "string" ? link : (link as { href: string }).href;
-      const res = await fetch(href, { signal: AbortSignal.timeout(30_000) });
-      if (!res.ok) throw new Error(`download failed: ${res.status}`);
-      const buf = Buffer.from(await res.arrayBuffer());
-      const ext = href.split(".").pop()?.toLowerCase() ?? "";
-      const mediaType =
-        ext === "png" ? "image/png" : ext === "gif" ? "image/gif" : ext === "webp" ? "image/webp" : "image/jpeg";
-      const caption = ctx.message.caption?.trim();
-      submitPrompt(
-        ctx.chat.id,
-        caption || "What can you tell me about this image?",
-        [{ type: "image", data: buf.toString("base64"), mimeType: mediaType }],
-        st,
-        generation,
-      );
-    } catch (err) {
-      await safeSend(ctx.chat.id, `⚠️ Couldn't process the photo: ${err instanceof Error ? err.message : String(err)}`);
-    }
+  const signal = st.generationController.signal;
+  const photo = ctx.message.photo![ctx.message.photo!.length - 1];
+  const caption = ctx.message.caption?.trim();
+  const images = (async (): Promise<ImageContent[]> => {
+    const link = await abortable(ctx.telegram.getFileLink(photo.file_id), signal);
+    const href = typeof link === "string" ? link : (link as { href: string }).href;
+    const downloadSignal = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
+    const downloaded = await downloadTelegramFile(href, downloadSignal);
+    const ext = new URL(href).pathname.split(".").pop()?.toLowerCase() ?? "";
+    const fallbackType =
+      ext === "png" ? "image/png" : ext === "gif" ? "image/gif" : ext === "webp" ? "image/webp" : "image/jpeg";
+    const mediaType = downloaded.contentType?.startsWith("image/") ? downloaded.contentType : fallbackType;
+    return [{ type: "image", data: downloaded.data.toString("base64"), mimeType: mediaType }];
   })();
+  submitPrompt(
+    ctx.chat.id,
+    caption || "What can you tell me about this image?",
+    images,
+    st,
+    generation,
+  );
 });
 
 bot.on("document", async (ctx) => {
@@ -1007,7 +1158,8 @@ async function main() {
   if (IPV4_ONLY) log("   ipv4 only   : on (PI_TELEGRAM_IPV4_ONLY=true)");
   log(`   working dir : ${DEFAULT_CWD}`);
   log(`   sessions    : ${SESSIONS_DIR}`);
-  log(`   allowed ids : ${[...ALLOWED_IDS].join(", ") || "(none)"}`);
+  log(`   allowed users: ${[...ALLOWED_USER_IDS].join(", ") || "(none)"}`);
+  if (DROP_PENDING_UPDATES) log("   drop pending : on (PI_TELEGRAM_DROP_PENDING_UPDATES=true)");
   log(`   model       : ${MODEL_ARG ?? "default from settings"}`);
   log("Waiting for messages. Ctrl+C to stop.");
 
@@ -1017,7 +1169,7 @@ async function main() {
   // resolves only after the bot is stopped. Retry transient proxy drops
   // instead of dying; give up only after retries (crash-restart takes over).
   try {
-    await withRetry(() => bot.launch({ dropPendingUpdates: true }), 4, 1500);
+    await withRetry(() => bot.launch({ dropPendingUpdates: DROP_PENDING_UPDATES }), 4, 1500);
   } catch (err) {
     log(`FATAL: bot launch failed after retries: ${String((err as Error)?.message ?? err)}`);
     process.exit(1);

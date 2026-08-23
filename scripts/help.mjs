@@ -44,7 +44,7 @@ for (const [cmd, desc] of botCmds) console.log(`  ${cmd.padEnd(18)} ${desc}`);
 console.log(`
 KEY PATHS:
   logs/gateway.log      runtime log (last 10 lines: npm run status)
-  logs/archive/         rotated logs kept for debugging
+  logs/archive/         newest 20 pre-launch archives per log type
   sessions/chat-<id>.jsonl   per-chat conversation history
   .env                  config (bot token, allowlist) — never committed
 

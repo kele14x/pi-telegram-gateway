@@ -164,10 +164,7 @@ function assert(cond, label) {
   const s = new TelegramStream(bot, 77);
   s.append("rate limited?");
   await sleep(1000);          // initial send
-  await s.finalize();         // edit → 429 (schedules retry)
-  await sleep(3500);          // retry #1 → 429 again
-  await sleep(3500);          // retry #2 → 429 again
-  await sleep(3500);          // retry #3 → success
+  await s.finalize();         // edit retries three times, then succeeds
   assert([...messages.values()].join("") === "rate limited?", "final text landed after retries");
   assert(calls.send.length >= 1 && calls.edit.length >= 1, "send + successful edit recorded");
 }
@@ -266,12 +263,82 @@ function assert(cond, label) {
   s.append("a");
   await sleep(100);
   s.append("b");
-  await sleep(900); // edit of "ab" fails and schedules a retry
+  await sleep(900); // edit of "ab" fails and enters its bounded retry delay
   s.append("c");
-  await sleep(300); // newer "abc" edit succeeds before the retry
-  await sleep(1800); // allow retry timer to fire
+  await sleep(1000); // stale retry exits; newer "abc" edit succeeds
+  await s.finalize();
   assert(messages.get(1) === "abc", `newer content remains (got ${JSON.stringify(messages.get(1))})`);
   assert(calls.some((c) => c.text === "ab") && calls.some((c) => c.text === "abc"), "both edits were attempted");
+}
+
+// ── Scenario K: exact chunk boundary must not create a status-only message ──
+{
+  console.log("K) exact 3900-char boundary");
+  const { bot, calls, finalState } = makeMockBot();
+  const s = new TelegramStream(bot, 77);
+  s.setStatus("⏳ thinking…");
+  s.append("X".repeat(3900));
+  await s.finalize();
+  assert(calls.send.length === 1, `exactly one message sent (got ${calls.send.length})`);
+  assert(finalState() === "X".repeat(3900), "no stray status-only continuation");
+}
+
+// ── Scenario L: transient non-429 transport errors are retried ──────────────
+{
+  console.log("L) transient ECONNRESET retry");
+  let attempts = 0;
+  const messages = [];
+  const bot = {
+    telegram: {
+      async sendMessage(_chatId, text) {
+        attempts++;
+        if (attempts <= 2) {
+          const err = new Error("socket hang up");
+          err.code = "ECONNRESET";
+          throw err;
+        }
+        messages.push(text);
+        return { message_id: 1 };
+      },
+      async editMessageText() {
+        return { ok: true };
+      },
+    },
+  };
+  const s = new TelegramStream(bot, 77);
+  s.append("eventually delivered");
+  await s.finalize();
+  assert(attempts === 3, `delivery succeeded on third attempt (got ${attempts})`);
+  assert(messages[0] === "eventually delivered", "transient failure did not lose the answer");
+}
+
+// ── Scenario M: exhausted transport retries make finalize reject ────────────
+{
+  console.log("M) exhausted transport retries are observable");
+  let attempts = 0;
+  const bot = {
+    telegram: {
+      async sendMessage() {
+        attempts++;
+        const err = new Error("connection reset");
+        err.code = "ECONNRESET";
+        throw err;
+      },
+      async editMessageText() {
+        return { ok: true };
+      },
+    },
+  };
+  const s = new TelegramStream(bot, 77);
+  s.append("cannot deliver");
+  let rejected = false;
+  try {
+    await s.finalize();
+  } catch (err) {
+    rejected = String(err?.message ?? err).includes("delivery failed");
+  }
+  assert(attempts === 4, `retry bound is four attempts (got ${attempts})`);
+  assert(rejected, "finalize reports terminal delivery failure");
 }
 
 if (failures === 0) {
