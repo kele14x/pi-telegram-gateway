@@ -19,14 +19,13 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 #    waits for it, and passes the exit code through so Task Scheduler's
 #    RestartOnFailure still sees crashes. ────────────────────────────────────
 $vbsPath = Join-Path $Root "gateway-hidden.vbs"
+# Run with window style 0 = hidden (CREATE_NO_WINDOW) and wait for exit,
+# returning the exit code so Task Scheduler still sees crashes.
 $vbs = @'
 Set sh = CreateObject("WScript.Shell")
 sh.CurrentDirectory = "{ROOT}"
-Set proc = sh.Exec("{CMD}")
-Do While proc.Status = 0
-    WScript.Sleep 500
-Loop
-WScript.Quit proc.ExitCode
+code = sh.Run("{CMD}", 0, True)
+WScript.Quit code
 '@
 # Build the command line, then double every quote so it embeds cleanly in VBS.
 $cmdLine = 'cmd /c "{NODE}" --env-file-if-exists=.env index.ts >> logs\gateway.log 2>&1'
