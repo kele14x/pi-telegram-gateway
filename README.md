@@ -87,6 +87,7 @@ The bot's command menu (`/` button) is synced automatically at startup via
 | `PI_TELEGRAM_THINKING` | session default | initial thinking level |
 | `PI_TELEGRAM_APPEND_PROMPT` | – | extra instructions appended to the system prompt |
 | `TELEGRAM_PROXY` | – | HTTP(S) proxy for Telegram API calls (also honors `HTTPS_PROXY`/`HTTP_PROXY`) |
+| `PI_TELEGRAM_IPV4_ONLY` | `false` | IPv4-first DNS + IPv4-only Telegram agent; enable only if broken IPv6 stalls calls (node-fetch v2 has no happy-eyeballs) |
 
 ## 🪟 Autostart (Windows)
 
@@ -163,7 +164,7 @@ node test/commands-scope.mjs  # inspect the bot's per-scope command menus
 
 Layout:
 
-```
+```plaintext
 index.ts             bot wiring, session hub, commands
 telegram-stream.ts   live streaming + chunking into editable messages
 test/                offline tests
@@ -173,8 +174,9 @@ sessions/            per-chat session files (gitignored)
 ## 🛠️ Troubleshooting
 
 - **Gateway can't reach Telegram** (`ETIMEDOUT`): set `TELEGRAM_PROXY` or
-  `HTTPS_PROXY`. On networks with broken IPv6, the gateway forces IPv4 DNS
-  resolution (some Telegram CDN endpoints are only reachable via v4).
+  `HTTPS_PROXY`. If Telegram calls stall on a network with broken IPv6, set
+  `PI_TELEGRAM_IPV4_ONLY=true` to force IPv4 DNS resolution (some Telegram
+  CDN endpoints are only reachable via v4).
 - **`No matching model` / no API key**: check `~/.pi/agent/auth.json` and
   `~/.pi/agent/settings.json` — the gateway uses the same config as normal pi.
 - **Menu still shows old commands**: stale *scoped* lists from previous gateway

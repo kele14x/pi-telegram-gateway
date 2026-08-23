@@ -8,14 +8,15 @@ A chat gateway: users talk to a **pi coding agent** from Telegram. The gateway
 runs on the owner's machine, spawns one pi `AgentSession` per Telegram chat,
 and streams replies into editable Telegram messages. Built on the
 [@earendil-works/pi-coding-agent SDK](https://github.com/arendil-works/pi-coding-agent)
-+ [telegraf](https://github.com/telegraf/telegraf).
+
+- [telegraf](https://github.com/telegraf/telegraf).
 
 It is NOT a terminal UI and NOT an LLM provider — it reuses the owner's pi
 config (`~/.pi/agent` auth/settings/models/extensions) as-is.
 
 ## How it works (data flow)
 
-```
+```plaintext
 Telegram user ──> telegraf long-polling ──> index.ts handlers
                      │  (allowlist check: ALLOWED_TELEGRAM_IDS)
                      ▼
@@ -71,16 +72,14 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
    `BOT_COMMANDS` (also re-synced on startup via `setMyCommands` — scopes:
    default, `all_private_chats`, `all_group_chats`; stale scoped lists shadow
    defaults, see `test/commands-scope.mjs`), `scripts/help.mjs`, and README.
-6. **IPv4-first networking is required here.** Host IPv6 is broken; keep
-   `dns.setDefaultResultOrder("ipv4first")` and telegraf's IPv4-only agent
-   (`ipv4Lookup`). Do not remove without verifying `api.telegram.org` over v6.
+6. **IPv4-only networking is opt-in via `PI_TELEGRAM_IPV4_ONLY=true`.** The
+   default is normal dual-stack. Only enable the env switch on machines where
+   broken IPv6 stalls node-fetch v2 (it has no happy-eyeballs) — don't
+   hardcode `dns.setDefaultResultOrder("ipv4first")` unconditionally.
 7. **Session manager is opaque** — use the documented API (`SessionManager.open`,
    `createAgentSession`), don't hand-edit `.jsonl` session files.
 8. **Never push to the remote automatically.** Commit locally, run the full
-   validation, and push ONLY when the user explicitly asks. Pushed mistakes are
-   hard to correct: history rewrites require force-push (bad for any
-   collaborator or mirror), and on a public repo a leaked credential or id may
-   already be cached/copied by the time it's scrubbed. When in doubt, ask.
+   validation, and push ONLY when the user explicitly asks.
 
 ## Configuration (.env)
 
@@ -117,7 +116,7 @@ Model credentials come from `~/.pi/agent/` — never embed keys in code.
   - `git pull` from upstream is fine but review diffs — the gateway holds
     shell access to the machine (public repo; supply-chain caution).
 - Runs on Windows (paths, PowerShell scripts); keep cross-platform where free,
-  but never break Windows behavior (IPv4 agent, task scripts).
+  but never break Windows behavior (hidden-window task scripts).
 
 ## Repo hygiene
 

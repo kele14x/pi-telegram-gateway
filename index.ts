@@ -18,12 +18,16 @@ import os from "node:os";
 import { Agent as NodeHttpsAgent } from "node:https";
 import type { LookupFunction } from "node:net";
 
-// Resolve addresses IPv4-first: on networks where IPv6 is broken (but DNS
-// returns AAAA records), node-fetch (telegraf) hangs on the v6 attempt.
-dns.setDefaultResultOrder("ipv4first");
+// IPv4-only networking is opt-in via PI_TELEGRAM_IPV4_ONLY=true: on networks
+// where IPv6 is broken (but DNS still returns AAAA records), node-fetch v2
+// (telegraf) has no happy-eyeballs and can stall on the v6 attempt.
+const IPV4_ONLY = ["1", "true", "yes", "on"].includes(
+  (process.env.PI_TELEGRAM_IPV4_ONLY ?? "").trim().toLowerCase(),
+);
+if (IPV4_ONLY) dns.setDefaultResultOrder("ipv4first");
 
-// Telegraf bundles node-fetch v2, which does NOT do happy-eyeballs and can
-// stall on the first (broken) address family. Force IPv4 for its agent.
+// Telegraf bundles node-fetch v2, which does NOT do happy-eyeballs; when
+// IPV4_ONLY is set, force IPv4 for its agent (used below).
 const ipv4Lookup: LookupFunction = (hostname, options, callback) => {
   const opts = typeof options === "object" && options !== null ? options : {};
   dns.lookup(hostname, { ...opts, family: 4 }, (err, address, family) => {
@@ -313,13 +317,37 @@ async function safeSend(chatId: number, text: string) {
   }
 }
 
+// Retry a Telegram API call a few times with backoff: on flaky proxies a
+// single dropped TLS connection (ECONNRESET/socket-disconnect) must not kill
+// startup or break command sync.
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  attempts = 4,
+  baseDelayMs = 1000,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (i === attempts) break;
+      log(`[retry] ${i}/${attempts} failed (${String((err as Error)?.message ?? err)}), retrying in ${baseDelayMs}ms`);
+      await new Promise((r) => setTimeout(r, baseDelayMs));
+    }
+  }
+  throw lastErr;
+}
+
 // ═════════════════════════════ Telegram bot ═══════════════════════════════
 
 const bot = new Telegraf(
   BOT_TOKEN,
   PROXY_URL
     ? { telegram: { agent: new HttpsProxyAgent(PROXY_URL) } }
-    : { telegram: { agent: new NodeHttpsAgent({ lookup: ipv4Lookup }) } },
+    : IPV4_ONLY
+      ? { telegram: { agent: new NodeHttpsAgent({ lookup: ipv4Lookup }) } }
+      : undefined,
 );
 
 /** Access guard: only allowlisted users/chats may talk to the agent. */
@@ -657,7 +685,7 @@ async function main() {
     return;
   }
 
-  const me = await bot.telegram.getMe();
+  const me = await withRetry(() => bot.telegram.getMe());
   log(`🤖 running as @${me.username}`);
   // Keep the Telegram command menu in sync with this gateway. Scoped lists
   // (all_private_chats / all_group_chats) shadow the default list, so push to
@@ -668,11 +696,11 @@ async function main() {
     { type: "all_group_chats" as const },
   ];
   for (const scope of scopes) {
-    await bot.telegram
-      .setMyCommands(BOT_COMMANDS, scope ? { scope } : undefined)
+    await withRetry(() => bot.telegram.setMyCommands(BOT_COMMANDS, scope ? { scope } : undefined), 3)
       .catch((err) => log(`[commands] sync failed (${scope?.type ?? "default"}): ${String((err as Error)?.message ?? err)}`));
   }
   if (PROXY_URL) log(`   proxy       : ${PROXY_URL}`);
+  if (IPV4_ONLY) log("   ipv4 only   : on (PI_TELEGRAM_IPV4_ONLY=true)");
   log(`   working dir : ${DEFAULT_CWD}`);
   log(`   sessions    : ${SESSIONS_DIR}`);
   log(`   allowed ids : ${[...ALLOWED_IDS].join(", ") || "(none)"}`);
@@ -681,7 +709,15 @@ async function main() {
 
   // NOTE: in telegraf v4, launch() resolves only after the bot is stopped,
   // so everything after this line runs at shutdown time.
-  await bot.launch({ dropPendingUpdates: true });
+  // telegraf v4: launch() rejects on network errors (e.g. deleteWebhook),
+  // resolves only after the bot is stopped. Retry transient proxy drops
+  // instead of dying; give up only after retries (crash-restart takes over).
+  try {
+    await withRetry(() => bot.launch({ dropPendingUpdates: true }), 4, 1500);
+  } catch (err) {
+    log(`FATAL: bot launch failed after retries: ${String((err as Error)?.message ?? err)}`);
+    process.exit(1);
+  }
   log("bot stopped.");
 }
 
