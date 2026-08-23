@@ -9,6 +9,8 @@
   },
   "scripts": {
     "start": "node --env-file-if-exists=.env index.ts",
+    "start:daemon": "schtasks /Run /TN pi-telegram-gateway",
+    "stop": "powershell -NoProfile -ExecutionPolicy Bypass -File stop.ps1",
     "selftest": "node --env-file-if-exists=.env index.ts --selftest",
     "test": "node test/stream-test.mjs && node test/cd-test.mjs",
     "status": "powershell -NoProfile -ExecutionPolicy Bypass -File status.ps1",
