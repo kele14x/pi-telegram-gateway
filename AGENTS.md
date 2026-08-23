@@ -76,6 +76,11 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
    (`ipv4Lookup`). Do not remove without verifying `api.telegram.org` over v6.
 7. **Session manager is opaque** — use the documented API (`SessionManager.open`,
    `createAgentSession`), don't hand-edit `.jsonl` session files.
+8. **Never push to the remote automatically.** Commit locally, run the full
+   validation, and push ONLY when the user explicitly asks. Pushed mistakes are
+   hard to correct: history rewrites require force-push (bad for any
+   collaborator or mirror), and on a public repo a leaked credential or id may
+   already be cached/copied by the time it's scrubbed. When in doubt, ask.
 
 ## Configuration (.env)
 
@@ -118,6 +123,7 @@ Model credentials come from `~/.pi/agent/` — never embed keys in code.
 
 - Commit messages: imperative, concise, prefixed by area when relevant
   (e.g. `Stream: ...`, `Docs: ...`, `Autostart: ...`).
-- Branch `main` is the only branch; push directly.
+- Branch `main` is the only branch. Commits stay local until the user asks to
+  push (see rule 8).
 - Public repo — no secrets, no personal ids (real Telegram chat ids in tests
   must be placeholders or read from `.env`).
