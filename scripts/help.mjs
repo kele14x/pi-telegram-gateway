@@ -23,7 +23,6 @@ console.log("\nLOCAL CONSOLE COMMANDS (run from this project folder):\n");
 for (const [name, script] of Object.entries(pkg.scripts ?? {})) {
   const desc = SCRIPT_DESC[name] ?? "";
   console.log(`  npm run ${name.padEnd(13)} ${desc}`);
-  if (name === "start") console.log(`  npm start            ${SCRIPT_DESC.start}`);
 }
 console.log(`
   setup-autostart.ps1    register/refresh the scheduled task (run once)
