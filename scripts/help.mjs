@@ -36,7 +36,7 @@ const botCmds = [
   ["/new", "fresh conversation (keeps folder)"],
   ["/model [name]", "show / switch model"],
   ["/thinking [level]", "show / set thinking level"],
-  ["/stop", "abort the current run (bot-side)"],
+  ["/stop", "abort the current run and drop queued messages"],
   ["/status", "model, context, folder"],
 ];
 for (const [cmd, desc] of botCmds) console.log(`  ${cmd.padEnd(18)} ${desc}`);

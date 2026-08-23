@@ -10,7 +10,7 @@
  * Test: npm run selftest   (creates a session and sends one prompt, no bot)
  */
 
-import { mkdirSync, rmSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { join, resolve, sep, dirname } from "node:path";
 import process from "node:process";
 import dns from "node:dns";
@@ -116,21 +116,32 @@ const CHAT_HINT = [
 const META_FILE = join(SESSIONS_DIR, "meta.json");
 const chatMeta = new Map<number, string>();
 function loadChatMeta() {
+  let raw: string;
   try {
-    const data = JSON.parse(readFileSync(META_FILE, "utf8")) as Record<string, { cwd?: string }>;
+    raw = readFileSync(META_FILE, "utf8");
+  } catch {
+    return; // no meta file yet
+  }
+  try {
+    const data = JSON.parse(raw) as Record<string, { cwd?: string }>;
     for (const [k, v] of Object.entries(data)) {
       const id = Number(k);
       if (Number.isFinite(id) && typeof v?.cwd === "string") chatMeta.set(id, v.cwd);
     }
-  } catch {
-    /* no meta file yet */
+  } catch (err) {
+    // Don't silently drop every chat's cwd on a corrupt file — surface it.
+    log(`[meta] ignoring unreadable ${META_FILE}: ${String((err as Error)?.message ?? err)}`);
   }
 }
 function saveChatMeta(chatId: number, cwd: string) {
   chatMeta.set(chatId, cwd);
   try {
     mkdirSync(SESSIONS_DIR, { recursive: true });
-    writeFileSync(META_FILE, JSON.stringify(Object.fromEntries(chatMeta), null, 2));
+    // Write to a temp file and rename so a crash mid-write can never leave
+    // meta.json truncated/invalid (which would reset every chat's cwd to default).
+    const tmp = `${META_FILE}.tmp`;
+    writeFileSync(tmp, JSON.stringify(Object.fromEntries(chatMeta), null, 2));
+    renameSync(tmp, META_FILE);
   } catch (err) {
     log(`[meta] save failed: ${String((err as Error)?.message ?? err)}`);
   }
@@ -177,11 +188,11 @@ function expandHome(p: string): string {
   return p;
 }
 
-async function createChatSession(chatId: number, cwd: string): Promise<AgentSession> {
-  const sessionFile = join(SESSIONS_DIR, `chat-${chatId}.jsonl`);
+async function createChatSession(chatId: number, cwd: string, sessionsDir = SESSIONS_DIR): Promise<AgentSession> {
+  const sessionFile = join(sessionsDir, `chat-${chatId}.jsonl`);
   // cwdOverride keeps tools working in the chat's current folder even though
   // the session file header may record an older cwd.
-  const sm = SessionManager.open(sessionFile, SESSIONS_DIR, cwd);
+  const sm = SessionManager.open(sessionFile, sessionsDir, cwd);
 
   type SessionOptions = NonNullable<Parameters<typeof createAgentSession>[0]>;
   let model: SessionOptions["model"];
@@ -372,7 +383,7 @@ bot.command("start", async (ctx) => {
       "/sessions — session info for this chat\n" +
       "/model [name] — show / switch model (e.g. /model anthropic/claude-opus-4-5:high)\n" +
       "/thinking [level] — show / set thinking level (off…max)\n" +
-      "/stop — abort the current run\n" +
+      "/stop — abort the current run and drop queued messages\n" +
       "/status — session info\n" +
       "/cwd — show the current working folder\n" +
       "/help — this message",
@@ -387,7 +398,7 @@ bot.command("help", async (ctx) => {
       "/sessions — session info for this chat\n" +
       "/model [name] — show or switch model\n" +
       "/thinking [level] — show or set thinking level (off/minimal/low/medium/high/xhigh/max)\n" +
-      "/stop — abort the current run (new messages queue up by default)\n" +
+      "/stop — abort the current run and drop queued messages\n" +
       "/status — session info\n" +
       "/cwd — show the current working folder\n" +
       "/help — this message",
@@ -398,19 +409,19 @@ bot.command("new", async (ctx) => {
   const chatId = ctx.chat.id;
   const st = chats.get(chatId);
   if (st?.session) {
-    const file = st.session.sessionFile;
     try {
       st.session.dispose();
     } catch (err) {
       log(`[new] dispose: ${String((err as Error)?.message ?? err)}`);
     }
-    if (file) {
-      try {
-        rmSync(file, { force: true });
-      } catch {
-        /* ignore */
-      }
-    }
+  }
+  // Remove the persisted history even when no session is in memory (e.g. right
+  // after a restart, or after an earlier init failure) — otherwise the next
+  // message would silently resume the old conversation from the .jsonl file.
+  try {
+    rmSync(join(SESSIONS_DIR, `chat-${chatId}.jsonl`), { force: true });
+  } catch {
+    /* ignore */
   }
   chats.delete(chatId);
   await ctx.reply("🧹 Fresh session started (working folder kept). Send me anything to begin.");
@@ -479,8 +490,11 @@ bot.command("stop", async (ctx) => {
     await ctx.reply("Nothing is running.");
     return;
   }
+  // Cancel-all semantics: abort the active run AND drop any queued follow-ups
+  // (the SDK would otherwise drain them after the abort via continue()).
+  st.session.clearQueue();
   await st.session.abort().catch(() => {});
-  await ctx.reply("🛑 Aborted the current run.");
+  await ctx.reply("🛑 Aborted the current run and dropped queued messages.");
 });
 
 bot.command("status", async (ctx) => {
@@ -634,6 +648,18 @@ function log(...args: unknown[]) {
   console.log(new Date().toISOString(), ...args);
 }
 
+/** Strip credentials from a proxy URL before it reaches the logs. */
+function redactProxyUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    if (u.username) u.username = "***";
+    if (u.password) u.password = "***";
+    return u.toString();
+  } catch {
+    return "(unparseable proxy URL)";
+  }
+}
+
 const isSelftest = process.argv.includes("--selftest");
 
 let modelRuntime!: ModelRuntime;
@@ -668,19 +694,42 @@ async function main() {
 
   if (isSelftest) {
     log("selftest: creating a session and sending one prompt (no Telegram involved)…");
-    const session = await createChatSession(0x0bad0bad, DEFAULT_CWD); // deterministic dummy chat
+    // Use a throwaway sessions dir so the selftest never pollutes ./sessions.
+    const tmpSessions = mkdtempSync(join(os.tmpdir(), "pi-gw-selftest-"));
     const out: string[] = [];
-    session.subscribe((event) => {
-      if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-        out.push(event.assistantMessageEvent.delta);
+    let failed: unknown = null;
+    try {
+      const session = await createChatSession(0x0bad0bad, DEFAULT_CWD, tmpSessions);
+      session.subscribe((event) => {
+        if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+          out.push(event.assistantMessageEvent.delta);
+        }
+      });
+      await session.prompt("Reply with exactly: GATEWAY OK");
+      await new Promise((r) => setTimeout(r, 500));
+      console.log("── agent reply ──");
+      console.log(out.join(""));
+      console.log("──────────────────");
+      session.dispose();
+    } catch (err) {
+      failed = err;
+    } finally {
+      try {
+        rmSync(tmpSessions, { recursive: true, force: true });
+      } catch {
+        /* ignore */
       }
-    });
-    await session.prompt("Reply with exactly: GATEWAY OK");
-    await new Promise((r) => setTimeout(r, 500));
-    console.log("── agent reply ──");
-    console.log(out.join(""));
-    console.log("──────────────────");
-    session.dispose();
+    }
+    // Assert the expected output instead of reporting success blindly.
+    const reply = out.join("").trim();
+    if (failed) {
+      console.error(`✖ selftest FAILED: ${String((failed as Error)?.message ?? failed)}`);
+      process.exit(1);
+    }
+    if (reply !== "GATEWAY OK") {
+      console.error(`✖ selftest FAILED — expected exactly 'GATEWAY OK', got: ${JSON.stringify(reply)}`);
+      process.exit(1);
+    }
     log("selftest passed.");
     return;
   }
@@ -699,7 +748,7 @@ async function main() {
     await withRetry(() => bot.telegram.setMyCommands(BOT_COMMANDS, scope ? { scope } : undefined), 3)
       .catch((err) => log(`[commands] sync failed (${scope?.type ?? "default"}): ${String((err as Error)?.message ?? err)}`));
   }
-  if (PROXY_URL) log(`   proxy       : ${PROXY_URL}`);
+  if (PROXY_URL) log(`   proxy       : ${redactProxyUrl(PROXY_URL)}`);
   if (IPV4_ONLY) log("   ipv4 only   : on (PI_TELEGRAM_IPV4_ONLY=true)");
   log(`   working dir : ${DEFAULT_CWD}`);
   log(`   sessions    : ${SESSIONS_DIR}`);

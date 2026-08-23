@@ -68,7 +68,7 @@ it replies with your numeric id, and the gateway logs it too. Add it to
 | `/new` | fresh conversation (keeps the working folder) |
 | `/model [name]` | show / switch model, e.g. `/model openai/gpt-5:medium` |
 | `/thinking [level]` | show / cycle thinking level (`off … max`) |
-| `/stop` | abort the current run |
+| `/stop` | abort the current run and drop queued messages |
 | `/status` | model, context size, session file, working folder |
 | `/help` · `/start` | help text |
 
