@@ -14,6 +14,7 @@
     "selftest": "node --env-file-if-exists=.env index.ts --selftest",
     "test": "node test/stream-test.mjs && node test/cd-test.mjs",
     "status": "powershell -NoProfile -ExecutionPolicy Bypass -File status.ps1",
+    "help": "node scripts/help.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
