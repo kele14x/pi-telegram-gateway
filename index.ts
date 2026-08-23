@@ -11,7 +11,7 @@
  */
 
 import { mkdirSync, rmSync, readFileSync, writeFileSync, statSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { join, resolve, sep, dirname } from "node:path";
 import process from "node:process";
 import dns from "node:dns";
 import os from "node:os";
@@ -45,6 +45,36 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { TelegramStream } from "./telegram-stream.ts";
+
+// ── Single-instance lock ────────────────────────────────────────────────────
+// Prevents a duplicate gateway (e.g. Task Scheduler restart racing a manual
+// start) from polling the same bot and stealing updates.
+const LOCK_FILE = join(import.meta.dirname, "logs", "gateway.lock");
+function acquireLock(): boolean {
+  try {
+    const pid = Number(readFileSync(LOCK_FILE, "utf8"));
+    if (Number.isFinite(pid)) {
+      try {
+        process.kill(pid, 0); // throws if the pid is gone
+        return false; // another gateway is alive
+      } catch {
+        /* stale lock from a crashed process — take over */
+      }
+    }
+  } catch {
+    /* no lock file yet */
+  }
+  mkdirSync(dirname(LOCK_FILE), { recursive: true });
+  writeFileSync(LOCK_FILE, String(process.pid));
+  return true;
+}
+function releaseLock() {
+  try {
+    rmSync(LOCK_FILE, { force: true });
+  } catch {
+    /* ignore */
+  }
+}
 
 // ══════════════════════════════ Config ═══════════════════════════════════
 
@@ -583,6 +613,11 @@ let settingsManager!: SettingsManager;
 let loader!: DefaultResourceLoader;
 
 async function main() {
+  if (!isSelftest && !acquireLock()) {
+    console.error("Another gateway instance is already running. Exiting.");
+    process.exit(0);
+  }
+  if (!isSelftest) process.once("exit", releaseLock);
   mkdirSync(SESSIONS_DIR, { recursive: true });
   loadChatMeta();
 

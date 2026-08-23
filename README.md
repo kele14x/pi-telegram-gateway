@@ -88,6 +88,30 @@ The bot's command menu (`/` button) is synced automatically at startup via
 | `PI_TELEGRAM_APPEND_PROMPT` | – | extra instructions appended to the system prompt |
 | `TELEGRAM_PROXY` | – | HTTP(S) proxy for Telegram API calls (also honors `HTTPS_PROXY`/`HTTP_PROXY`) |
 
+## 🪟 Autostart (Windows)
+
+A Scheduled Task keeps the gateway alive across logons and crashes:
+
+```powershell
+# one-time setup (registers 'pi-telegram-gateway' task)
+powershell -ExecutionPolicy Bypass -File setup-autostart.ps1
+
+# start it right now
+schtasks /Run /TN "pi-telegram-gateway"
+
+# check status
+schtasks /Query /TN "pi-telegram-gateway"
+
+# remove the task
+schtasks /Delete /TN "pi-telegram-gateway" /F
+```
+
+The task runs the gateway in the foreground (logs to `logs/gateway.log`) so
+Task Scheduler restarts it 1 minute after a crash. The gateway holds a
+single-instance lock (`logs/gateway.lock`) so a manual `npm start` can never
+run a second, conflicting poller. Re-run `setup-autostart.ps1` after moving the
+repo or upgrading Node (it pins the Node path at setup time).
+
 ## 🗃️ Sessions & working folders
 
 - Every chat gets its own session: `sessions/chat-<chatid>.jsonl`
