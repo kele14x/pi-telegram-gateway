@@ -10,7 +10,8 @@
  * Test: npm run selftest   (creates a session and sends one prompt, no bot)
  */
 
-import { mkdirSync, mkdtempSync, renameSync, rmSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import process from "node:process";
 import dns from "node:dns";
@@ -89,7 +90,7 @@ const ALLOWED_USER_IDS = new Set(
     .map((s) => s.trim())
     .filter(Boolean)
     .map(Number)
-    .filter((n) => Number.isFinite(n)),
+    .filter((n) => Number.isInteger(n)),
 );
 
 const DEFAULT_CWD = resolve(process.env.PI_TELEGRAM_CWD ?? process.cwd());
@@ -275,12 +276,6 @@ function wireSession(chatId: number, session: AgentSession, stream: TelegramStre
         stream.setStatus(`✅ ${event.toolName}${event.isError ? " ❌" : ""}`);
         break;
       }
-      case "queue_update": {
-        if (event.followUp.length > 0) {
-          void safeSend(chatId, `📥 Queued (after current task): “${event.followUp[0].slice(0, 60)}…”`);
-        }
-        break;
-      }
       case "agent_end": {
         const terminalError = errors.finishAttempt(event.willRetry);
         if (!event.willRetry) {
@@ -389,7 +384,7 @@ async function getChatSession(
             return undefined;
           }
           st.session = session;
-          st.stream = new TelegramStream(bot, chatId);
+          st.stream = new TelegramStream(bot, chatId, log);
           wireSession(chatId, session, st.stream);
           const m = session.model;
           log(
@@ -790,7 +785,7 @@ bot.command("thinking", async (ctx) => {
 
 bot.command("stop", async (ctx) => {
   const st = chats.get(ctx.chat.id);
-  if (!st) {
+  if (!st || (st.busy === 0 && !st.session?.isStreaming)) {
     await ctx.reply("Nothing is running.");
     return;
   }
@@ -841,7 +836,7 @@ bot.command("cd", async (ctx) => {
   }
   const target = resolve(st.cwd, expandHome(raw));
   try {
-    if (!statSync(target).isDirectory()) throw new Error("not a directory");
+    if (!(await stat(target)).isDirectory()) throw new Error("not a directory");
   } catch {
     await ctx.reply(`⚠️ No such directory: ${target}`).catch(() => {});
     return;
@@ -870,7 +865,7 @@ bot.command("sessions", async (ctx) => {
   const file = s.sessionFile ?? "(none)";
   let size = "?";
   try {
-    size = `${statSync(file).size} bytes`;
+    size = `${(await stat(file)).size} bytes`;
   } catch {
     /* ignore */
   }

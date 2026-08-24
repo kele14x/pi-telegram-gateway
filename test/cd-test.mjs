@@ -2,25 +2,29 @@
 // different cwd override (B) — the mechanic behind the bot's /cd command.
 // No LLM call is made (session creation only). Run: node test/cd-test.mjs
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createAgentSession,
   DefaultResourceLoader,
   getAgentDir,
-  createEventBus,
+  ModelRuntime,
   SettingsManager,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 
-const dirA = "C:/Users/Kele";
-const dirB = "C:/Users/Kele/pi-telegram-gateway";
-const sessionsDir = mkdtempSync(join(tmpdir(), "pi-gw-cd-"));
+const base = mkdtempSync(join(tmpdir(), "pi-gw-cd-"));
+const dirA = join(base, "folder-a");
+const dirB = join(base, "folder-b");
+const sessionsDir = join(base, "sessions");
+mkdirSync(dirA, { recursive: true });
+mkdirSync(dirB, { recursive: true });
+mkdirSync(sessionsDir, { recursive: true });
 
 const loader = new DefaultResourceLoader({ cwd: dirA, agentDir: getAgentDir() });
 await loader.reload();
-const modelRuntime = await (await import("@earendil-works/pi-coding-agent")).ModelRuntime.create();
+const modelRuntime = await ModelRuntime.create();
 
 let failed = false;
 const assert = (cond, label) => {
@@ -59,7 +63,7 @@ assert(typeof sB.prompt === "function" && typeof sB.abort === "function", "agent
 console.log("  cwd override active for tools:",
   JSON.stringify(sB.agent.state.tools.map((t) => t.name).slice(0, 4)));
 sB.dispose();
-rmSync(sessionsDir, { recursive: true, force: true });
+rmSync(base, { recursive: true, force: true });
 
 console.log(failed ? "\ncd-test FAILED ❌" : "\ncd-test passed ✅");
 process.exit(failed ? 1 : 0);

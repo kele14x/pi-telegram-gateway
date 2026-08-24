@@ -21,9 +21,11 @@ const EDIT_MIN_INTERVAL_MS = 800;
 const MAX_DELIVERY_ATTEMPTS = 4;
 const TRANSIENT_RETRY_BASE_MS = 500;
 
-function log(...args: unknown[]) {
+export type StreamLogger = (...args: unknown[]) => void;
+
+const defaultLog: StreamLogger = (...args) => {
   console.log(new Date().toISOString(), ...args);
-}
+};
 
 interface Segment {
   text: string;
@@ -96,10 +98,12 @@ export class TelegramStream {
   private ioChain: Promise<void> = Promise.resolve();
   /** Flushes that have started planning operations but have not completed. */
   private activeFlushes: { segs: Segment[]; promise: Promise<void> }[] = [];
+  private log: StreamLogger;
 
-  constructor(bot: Telegraf, chatId: number) {
+  constructor(bot: Telegraf, chatId: number, log: StreamLogger = defaultLog) {
     this.bot = bot;
     this.chatId = chatId;
+    this.log = log;
   }
 
   private get open() {
@@ -211,14 +215,14 @@ export class TelegramStream {
           const retryable = isRetryableDeliveryError(err);
           if (!retryable || attempt === MAX_DELIVERY_ATTEMPTS) {
             if (!this.canceled && version === seg.version) this.deliveryFailures.set(seg, version);
-            log(`[edit] delivery failed after ${attempt} attempt${attempt === 1 ? "" : "s"}: ${msg}`);
+            this.log(`[edit] delivery failed after ${attempt} attempt${attempt === 1 ? "" : "s"}: ${msg}`);
             return;
           }
           const retryAfter = retryAfterSeconds(err);
           const delayMs = retryAfter === undefined
             ? Math.min(TRANSIENT_RETRY_BASE_MS * 2 ** (attempt - 1), 30_000)
             : Math.min(retryAfter * 1000 + 250, 30_000);
-          log(`[edit] attempt ${attempt}/${MAX_DELIVERY_ATTEMPTS} failed: ${msg}; retrying in ${delayMs}ms`);
+          this.log(`[edit] attempt ${attempt}/${MAX_DELIVERY_ATTEMPTS} failed: ${msg}; retrying in ${delayMs}ms`);
           await delay(delayMs);
         }
       }
