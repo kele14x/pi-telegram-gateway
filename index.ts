@@ -10,7 +10,7 @@
  * Test: npm run selftest   (creates a session and sends one prompt, no bot)
  */
 
-import { mkdirSync, mkdtempSync, renameSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import process from "node:process";
@@ -54,6 +54,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { createChatSettingsManager } from "./chat-settings.ts";
+import { parseChatMeta, writeChatMeta, type ChatMetaEntry } from "./chat-meta.ts";
 import { removeChatHistory } from "./history.ts";
 import { acquireInstanceLock, type InstanceLock } from "./instance-lock.ts";
 import { SessionErrorBuffer } from "./session-errors.ts";
@@ -112,9 +113,10 @@ const CHAT_HINT = [
   "Respond conversationally: keep replies focused and reasonably short, summarize large outputs instead of dumping raw content, and use Markdown (``` fences) for code snippets.",
 ];
 
-// Per-chat state persisted across restarts (currently just the working folder).
+// Per-chat state persisted across restarts and session replacements:
+// working folder plus model/thinking preferences.
 const META_FILE = join(SESSIONS_DIR, "meta.json");
-const chatMeta = new Map<number, string>();
+const chatMeta = new Map<number, ChatMetaEntry>();
 function loadChatMeta() {
   // Remove a stale temp file left by a crash mid-save (the next save
   // overwrites it anyway, but keep the directory tidy).
@@ -130,25 +132,17 @@ function loadChatMeta() {
     return; // no meta file yet
   }
   try {
-    const data = JSON.parse(raw) as Record<string, { cwd?: string }>;
-    for (const [k, v] of Object.entries(data)) {
-      const id = Number(k);
-      if (Number.isFinite(id) && typeof v?.cwd === "string") chatMeta.set(id, v.cwd);
-    }
+    for (const [id, entry] of parseChatMeta(raw)) chatMeta.set(id, entry);
   } catch (err) {
-    // Don't silently drop every chat's cwd on a corrupt file — surface it.
+    // Don't silently drop every chat's state on a corrupt file — surface it.
     log(`[meta] ignoring unreadable ${META_FILE}: ${String((err as Error)?.message ?? err)}`);
   }
 }
-function saveChatMeta(chatId: number, cwd: string): boolean {
-  chatMeta.set(chatId, cwd);
+function saveChatMeta(chatId: number, patch: Partial<ChatMetaEntry>): boolean {
+  chatMeta.set(chatId, { ...chatMeta.get(chatId), ...patch });
   try {
     mkdirSync(SESSIONS_DIR, { recursive: true });
-    // Write to a temp file and rename so a crash mid-write can never leave
-    // meta.json truncated/invalid (which would reset every chat's cwd to default).
-    const tmp = `${META_FILE}.tmp`;
-    writeFileSync(tmp, JSON.stringify(Object.fromEntries(chatMeta), null, 2));
-    renameSync(tmp, META_FILE);
+    writeChatMeta(META_FILE, chatMeta);
     return true;
   } catch (err) {
     log(`[meta] save failed: ${String((err as Error)?.message ?? err)}`);
@@ -216,15 +210,27 @@ async function createChatSession(chatId: number, cwd: string, sessionsDir = SESS
   const sm = SessionManager.open(sessionFile, sessionsDir, cwd);
 
   type SessionOptions = NonNullable<Parameters<typeof createAgentSession>[0]>;
+  // Per-chat preferences (bound to the chat; survive /cd, /new, and restarts)
+  // take priority over the PI_TELEGRAM_MODEL / PI_TELEGRAM_THINKING startup env.
+  const meta = chatMeta.get(chatId);
+  let cliModel = meta?.model ?? MODEL_ARG;
+  const thinkingPref = meta?.thinking ?? THINKING_ARG;
   let model: SessionOptions["model"];
-  let thinkingLevel: SessionOptions["thinkingLevel"];
-  if (MODEL_ARG) {
-    const r = resolveCliModel({ cliModel: MODEL_ARG, modelRuntime });
-    if (r.error) throw new Error(`Bad PI_TELEGRAM_MODEL: ${r.error}`);
-    model = r.model;
-    thinkingLevel = (r.thinkingLevel ?? THINKING_ARG) as SessionOptions["thinkingLevel"];
-  } else {
-    thinkingLevel = THINKING_ARG as SessionOptions["thinkingLevel"];
+  let thinkingLevel = thinkingPref as SessionOptions["thinkingLevel"];
+  if (cliModel) {
+    let r = resolveCliModel({ cliModel, modelRuntime });
+    if (r.error && meta?.model) {
+      // A stored per-chat model can outlive its catalog entry; degrade to the
+      // startup default instead of blocking the chat.
+      log(`[chat ${chatId}] stored model "${meta.model}" no longer resolves (${r.error}); using startup default`);
+      cliModel = MODEL_ARG;
+      if (cliModel) r = resolveCliModel({ cliModel, modelRuntime });
+    }
+    if (cliModel) {
+      if (r.error) throw new Error(`Bad PI_TELEGRAM_MODEL: ${r.error}`);
+      model = r.model;
+      if (r.thinkingLevel) thinkingLevel = r.thinkingLevel as SessionOptions["thinkingLevel"];
+    }
   }
 
   const { session } = await createAgentSession({
@@ -312,7 +318,7 @@ function ensureChat(chatId: number): ChatState {
   if (!st) {
     st = {
       chatId,
-      cwd: chatMeta.get(chatId) ?? DEFAULT_CWD,
+      cwd: chatMeta.get(chatId)?.cwd ?? DEFAULT_CWD,
       session: null,
       stream: null,
       chain: Promise.resolve(),
@@ -731,6 +737,7 @@ bot.command("model", async (ctx) => {
       if (arg === "cycle") {
         const r = await session.cycleModel();
         const m = session.model;
+        if (m) saveChatMeta(ctx.chat.id, { model: `${m.provider}/${m.id}` });
         await ctx.reply(`🔄 ${r ? "Cycled" : "No models to cycle through"} — now: ${m ? `${m.provider}/${m.id}` : "?"}`);
         return;
       }
@@ -742,7 +749,15 @@ bot.command("model", async (ctx) => {
       if (!isCurrentChat(st, generation)) return;
       await session.setModel(r.model);
       if (r.thinkingLevel) await session.setThinkingLevel(r.thinkingLevel);
-      if (isCurrentChat(st, generation)) await ctx.reply(`✓ Model set to ${r.model.provider}/${r.model.id}`);
+      const patch: Partial<ChatMetaEntry> = { model: `${r.model.provider}/${r.model.id}` };
+      if (r.thinkingLevel) patch.thinking = r.thinkingLevel;
+      const persisted = saveChatMeta(ctx.chat.id, patch);
+      if (isCurrentChat(st, generation)) {
+        await ctx.reply(
+          `✓ Model set to ${r.model.provider}/${r.model.id}` +
+            (persisted ? "" : "\n\n⚠️ Couldn't save this choice to meta.json — it will revert after a restart."),
+        );
+      }
     } catch (err) {
       if (err instanceof ChatOperationCancelled) return;
       await ctx.reply(`⚠️ ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
@@ -766,6 +781,7 @@ bot.command("thinking", async (ctx) => {
       }
       if (arg === "cycle") {
         const level = session.cycleThinkingLevel();
+        if (level) saveChatMeta(ctx.chat.id, { thinking: level });
         await ctx.reply(`🔄 thinking level: ${level}`);
         return;
       }
@@ -775,7 +791,13 @@ bot.command("thinking", async (ctx) => {
       }
       if (!isCurrentChat(st, generation)) return;
       session.setThinkingLevel(arg as (typeof THINKING_LEVELS)[number]);
-      if (isCurrentChat(st, generation)) await ctx.reply(`✓ thinking level: ${arg}`);
+      const persisted = saveChatMeta(ctx.chat.id, { thinking: arg });
+      if (isCurrentChat(st, generation)) {
+        await ctx.reply(
+          `✓ thinking level: ${arg}` +
+            (persisted ? "" : "\n\n⚠️ Couldn't save this choice to meta.json — it will revert after a restart."),
+        );
+      }
     } catch (err) {
       if (err instanceof ChatOperationCancelled) return;
       await ctx.reply(`⚠️ ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
@@ -842,7 +864,7 @@ bot.command("cd", async (ctx) => {
     return;
   }
   st.cwd = target;
-  const persisted = saveChatMeta(ctx.chat.id, target);
+  const persisted = saveChatMeta(ctx.chat.id, { cwd: target });
   // Invalidate queued submissions and any in-flight session creation, so
   // nothing from the old folder runs after the switch.
   advanceChatGeneration(st);

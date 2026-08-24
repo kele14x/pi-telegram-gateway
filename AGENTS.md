@@ -33,6 +33,12 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
   via `SessionManager.open(file, dir, cwdOverride)` + `createAgentSession({cwd})`.
   A session file's header cwd may be older than the current chat cwd — that's
   intentional; always pass the chat cwd, never rely on the header.
+- **Per-chat model/thinking** (`/model`, `/thinking`): also stored in
+  `sessions/meta.json` and restored in `createChatSession` (meta → env
+  `PI_TELEGRAM_MODEL`/`PI_TELEGRAM_THINKING` → pi default), so they survive
+  `/cd`, `/new`, and restarts. A stored model that no longer resolves degrades
+  to the startup default with a log line. Runtime isolation still comes from
+  `chat-settings.ts` (in-memory settings layer).
 - **Streaming**: `message_update` `text_delta` events are appended to a
   `TelegramStream`; `tool_execution_start/end` update a status line; the run is
   finalized on `agent_end` (NOT `message_end` — multiple assistant turns per
@@ -53,6 +59,7 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 | --- | --- |
 | `index.ts` | entrypoint: config (.env), telegraf wiring, user allowlist, commands, per-chat session hub, bootstrap (ModelRuntime / DefaultResourceLoader / SettingsManager) |
 | `chat-settings.ts` | creates an in-memory settings layer per Telegram chat so model/thinking changes never rewrite the owner's pi settings |
+| `chat-meta.ts` | parses/atomically writes `sessions/meta.json` (per-chat cwd + model/thinking) |
 | `history.ts` | deletes one per-chat SDK history file and deliberately propagates failure to `/new` |
 | `instance-lock.ts` | atomic, heartbeat-backed single-instance lock plus ownership metadata |
 | `session-errors.ts` | defers assistant error rendering until `agent_end` determines whether the attempt will retry |
@@ -62,8 +69,8 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 | `remove-autostart.ps1` | idempotent task/launcher cleanup; reads the existing task XML so a task registered from an old repo path can be removed safely without deleting config/data/logs |
 | `start-gateway.ps1` / `stop.ps1` / `status.ps1` | manual start (detached), clean stop (kills leaked task tree), status overview |
 | `scripts/help.mjs` | `npm run help` cheat sheet |
-| `test/` | offline tests: `stream-test.mjs` (chunking/retry), `cd-test.mjs` (cwd override reopen), `commands-scope.mjs` (per-scope command menus) |
-| `sessions/` | runtime data: per-chat `.jsonl` histories + `meta.json` (per-chat cwd) — **gitignored** |
+| `test/` | offline tests: `stream-test.mjs` (chunking/retry), `cd-test.mjs` (cwd override reopen), `chat-meta-test.mjs` (meta.json parse/write), `commands-scope.mjs` (per-scope command menus) |
+| `sessions/` | runtime data: per-chat `.jsonl` histories + `meta.json` (per-chat cwd/model/thinking) — **gitignored** |
 
 ## Non-negotiable rules
 

@@ -19,7 +19,8 @@
 - **Per-chat working folder** — `/cd <folder>` switches where the agent's
   files/shell tools operate, persisted across restarts
 - **Per-chat model & thinking** — `/model anthropic/claude-opus-4-5:high`,
-  `/thinking medium`
+  `/thinking medium`; choices are bound to the chat and survive `/cd`, `/new`,
+  and gateway restarts
 - **Reuses your pi config** — same `~/.pi/agent` credentials, settings, models,
   and extensions as your terminal pi. No extra API keys.
 - **Queueing** — messages sent while the agent is busy are queued
@@ -66,8 +67,8 @@ it replies with your numeric id, and the gateway logs it too. Add it to
 | `/cwd` | show the current working folder |
 | `/sessions` | session details (file, size, context count, model) |
 | `/new` | fresh conversation (keeps the working folder) |
-| `/model [name]` | show / switch model, e.g. `/model openai/gpt-5:medium` |
-| `/thinking [level]` | show / cycle thinking level (`off … max`) |
+| `/model [name]` | show / switch model, e.g. `/model openai/gpt-5:medium` (persists per chat) |
+| `/thinking [level]` | show / cycle thinking level (`off … max`) (persists per chat) |
 | `/stop` | abort the current run and drop queued messages |
 | `/status` | model, context size, session file, working folder |
 | `/help` · `/start` | help text |
@@ -128,7 +129,10 @@ newest 20 archives are retained for each log type.
   (the same format pi uses), loaded lazily on first message and resumed on restart.
 - `/cd` keeps the same history file and re-opens it with the new folder as the
   agent's working directory — your conversation continues where you left off.
-- Per-chat folders persist across restarts in `sessions/meta.json`.
+- Per-chat folders persist across restarts in `sessions/meta.json`; per-chat
+  model/thinking choices are stored there too, so they survive `/cd`, `/new`,
+  and restarts (a stored model that no longer exists falls back to the startup
+  default).
 - Project-level skills/prompts/`AGENTS.md` are still discovered from the launch
   folder (per-chat `/cd` affects file/shell tools).
 
@@ -177,6 +181,7 @@ Layout:
 ```plaintext
 index.ts             bot wiring, session hub, commands
 chat-settings.ts     isolated per-chat pi settings
+chat-meta.ts         per-chat cwd/model/thinking persistence (meta.json)
 history.ts           failure-aware per-chat history removal
 instance-lock.ts     atomic heartbeat-backed process lock
 session-errors.ts    terminal-vs-retry model error buffering
