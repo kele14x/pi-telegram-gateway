@@ -660,11 +660,11 @@ bot.command("start", async (ctx) => {
       "Commands:\n" +
       "/new — start a fresh conversation (clears history)\n" +
       "/cd <folder> — switch this chat's working folder\n" +
-      "/sessions — session info for this chat\n" +
+      "/sessions — conversation storage details for this chat\n" +
       "/model [name] — show / switch model (e.g. /model anthropic/claude-opus-4-5:high)\n" +
       "/thinking [level] — show / set thinking level (off…max)\n" +
       "/stop — abort the current run and drop queued messages\n" +
-      "/status — session info\n" +
+      "/status — show live agent activity\n" +
       "/cwd — show the current working folder\n" +
       "/help — this message",
   );
@@ -675,11 +675,11 @@ bot.command("help", async (ctx) => {
     "Just chat: send text or photos. The agent keeps a persistent conversation per chat.\n\n" +
       "/new — fresh conversation (keeps the working folder)\n" +
       "/cd <folder> — switch this chat's working folder (absolute or relative, ~ supported)\n" +
-      "/sessions — session info for this chat\n" +
+      "/sessions — conversation storage details for this chat\n" +
       "/model [name] — show or switch model\n" +
       "/thinking [level] — show or set thinking level (off/minimal/low/medium/high/xhigh/max)\n" +
       "/stop — abort the current run and drop queued messages\n" +
-      "/status — session info\n" +
+      "/status — show live agent activity\n" +
       "/cwd — show the current working folder\n" +
       "/help — this message",
   );
@@ -826,16 +826,16 @@ bot.command("stop", async (ctx) => {
 bot.command("status", async (ctx) => {
   const st = ensureChat(ctx.chat.id);
   if (!st.session) {
-    await ctx.reply(`No session yet — send a message to start one.\nWorking folder: ${st.cwd}`);
+    await ctx.reply(`Status: ⚪ idle\nNo session yet — send a message to start one.\nWorking folder: ${st.cwd}`);
     return;
   }
   const s = st.session;
+  const queuedPrompts = Math.max(0, st.busy - 1);
   await ctx.reply(
     `Status: ${s.isStreaming ? "🟢 working" : "⚪ idle"}\n` +
+      `Queued prompts: ${queuedPrompts}\n` +
       `Model: ${s.model ? `${s.model.provider}/${s.model.id}` : "(default)"}\n` +
       `Thinking: ${s.thinkingLevel}\n` +
-      `Messages in context: ${s.messages.length}\n` +
-      `Session file: ${s.sessionFile ?? "(none)"}\n` +
       `Working folder: ${st.cwd}`,
   );
 });
@@ -896,10 +896,8 @@ bot.command("sessions", async (ctx) => {
       `File: ${file}\n` +
       `Size: ${size}\n` +
       `Messages in context: ${s.messages.length}\n` +
-      `Model: ${s.model ? `${s.model.provider}/${s.model.id}` : "(default)"}\n` +
-      `Thinking: ${s.thinkingLevel}\n` +
-      `Working folder: ${st.cwd}\n\n` +
-      `Use /new for a fresh conversation (same folder), /cd <folder> to change folder.`,
+      `History: persistent for this chat\n\n` +
+      `Use /new for a fresh conversation (keeps the working folder), /cd <folder> to change folder.`,
   );
 });
 
@@ -912,10 +910,10 @@ const BOT_COMMANDS = [
   { command: "new", description: "Start a fresh conversation (keeps working folder)" },
   { command: "cd", description: "Change this chat’s working folder, e.g. /cd ~/Desktop" },
   { command: "cwd", description: "Show the current working folder" },
-  { command: "sessions", description: "Show session details for this chat" },
+  { command: "sessions", description: "Show conversation storage details" },
   { command: "model", description: "Show or switch model, e.g. /model anthropic/claude-opus-4-5:high" },
   { command: "thinking", description: "Show or set thinking level (off…max)" },
-  { command: "status", description: "Show model, context size, working folder" },
+  { command: "status", description: "Show live agent activity and queue" },
   { command: "stop", description: "Abort the current run and drop queued messages" },
 ];
 

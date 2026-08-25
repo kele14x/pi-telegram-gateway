@@ -65,12 +65,12 @@ it replies with your numeric id, and the gateway logs it too. Add it to
 | 📷 photo (+ caption) | sent as an image to the agent |
 | `/cd <folder>` | switch this chat's working folder (absolute, relative, or `~`); history is kept |
 | `/cwd` | show the current working folder |
-| `/sessions` | session details (file, size, context count, model) |
+| `/sessions` | conversation storage details (file, size, context count) |
 | `/new` | fresh conversation (keeps the working folder) |
 | `/model [name]` | show / switch model, e.g. `/model openai/gpt-5:medium` (persists per chat) |
 | `/thinking [level]` | show / cycle thinking level (`off … max`) (persists per chat) |
 | `/stop` | abort the current run and drop queued messages |
-| `/status` | model, context size, session file, working folder |
+| `/status` | live activity, prompt queue, model, thinking, working folder |
 | `/help` · `/start` | help text |
 
 The bot's command menu (`/` button) is synced automatically at startup via
