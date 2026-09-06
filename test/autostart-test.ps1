@@ -34,7 +34,8 @@ Assert (Test-AbsoluteWindowsPath $oldLauncher) "absolute drive path was rejected
 Assert (-not (Test-AbsoluteWindowsPath "gateway-hidden.vbs")) "relative launcher path was accepted"
 
 $tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
-$tempRoot = [IO.Path]::GetFullPath((Join-Path $tempBase ("pi gateway autostart " + [guid]::NewGuid().ToString("N"))))
+$unicodeName = ([string][char]0x4E2D) + ([string][char]0x6587)
+$tempRoot = [IO.Path]::GetFullPath((Join-Path $tempBase ("pi gateway autostart " + $unicodeName + ' ' + [guid]::NewGuid().ToString("N"))))
 Assert ($tempRoot.StartsWith($tempBase, [StringComparison]::OrdinalIgnoreCase)) "temporary fixture escaped the system temp directory"
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
 
@@ -49,7 +50,9 @@ try {
   $launcher = New-GatewayLauncherContent -GatewayRoot $tempRoot -NodePath (Get-Command node).Source `
     -EntryPath $testEntry -RotateScriptPath $testRotate -GatewayLogPath $testLog `
     -CmdPath (Join-Path $env:SystemRoot "System32\cmd.exe")
-  Set-Content -LiteralPath $testLauncher -Encoding ASCII -Value $launcher
+  Write-GatewayLauncher -Path $testLauncher -Content $launcher
+  $launcherBytes = [IO.File]::ReadAllBytes($testLauncher)
+  Assert ($launcherBytes[0] -eq 0xff -and $launcherBytes[1] -eq 0xfe) "launcher must use a UTF-16 BOM"
 
   & (Join-Path $env:SystemRoot "System32\cscript.exe") '//NoLogo' $testLauncher
   Assert ($LASTEXITCODE -eq 0) "generated hidden launcher returned exit code $LASTEXITCODE"

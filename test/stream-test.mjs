@@ -341,6 +341,33 @@ function assert(cond, label) {
   assert(rejected, "finalize reports terminal delivery failure");
 }
 
+// Unicode must remain valid in every API call, not just after rejoining chunks.
+{
+  console.log("N) emoji across streaming and finalization boundaries");
+  for (const mode of ["burst", "split-delta", "final-extra"]) {
+    const { bot, calls, finalState } = makeMockBot();
+    const s = new TelegramStream(bot, 77);
+    let expected;
+    if (mode === "final-extra") {
+      s.append("a");
+      const extra = "b".repeat(4093) + "😀" + "c".repeat(4094) + "😀";
+      expected = "a\n" + extra;
+      await s.finalize(extra);
+    } else {
+      expected = "a".repeat(3899) + "😀" + "b";
+      if (mode === "split-delta") {
+        s.append(expected.slice(0, 3900));
+        await sleep(50); // allow delivery before the low surrogate arrives
+        s.append(expected.slice(3900));
+      } else s.append(expected);
+      await s.finalize();
+    }
+    const posted = [...calls.send, ...calls.edit].map(call => call.text);
+    assert(posted.every(text => text.isWellFormed() && text.length <= 4096), `${mode}: all API payloads are valid and within the limit`);
+    assert(finalState() === expected, `${mode}: complete content preserved`);
+  }
+}
+
 if (failures === 0) {
   console.log("\nAll stream tests passed ✅");
 } else {

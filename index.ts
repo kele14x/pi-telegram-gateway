@@ -53,6 +53,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { createChatSettingsManager } from "./chat-settings.ts";
+import { parseChatMeta, serializeChatMeta } from "./chat-meta.ts";
 import { removeChatHistory } from "./history.ts";
 import { acquireInstanceLock, type InstanceLock } from "./instance-lock.ts";
 import { SessionErrorBuffer } from "./session-errors.ts";
@@ -129,11 +130,7 @@ function loadChatMeta() {
     return; // no meta file yet
   }
   try {
-    const data = JSON.parse(raw) as Record<string, { cwd?: string }>;
-    for (const [k, v] of Object.entries(data)) {
-      const id = Number(k);
-      if (Number.isFinite(id) && typeof v?.cwd === "string") chatMeta.set(id, v.cwd);
-    }
+    for (const [id, cwd] of parseChatMeta(raw)) chatMeta.set(id, cwd);
   } catch (err) {
     // Don't silently drop every chat's cwd on a corrupt file — surface it.
     log(`[meta] ignoring unreadable ${META_FILE}: ${String((err as Error)?.message ?? err)}`);
@@ -146,7 +143,7 @@ function saveChatMeta(chatId: number, cwd: string): boolean {
     // Write to a temp file and rename so a crash mid-write can never leave
     // meta.json truncated/invalid (which would reset every chat's cwd to default).
     const tmp = `${META_FILE}.tmp`;
-    writeFileSync(tmp, JSON.stringify(Object.fromEntries(chatMeta), null, 2));
+    writeFileSync(tmp, serializeChatMeta(chatMeta));
     renameSync(tmp, META_FILE);
     return true;
   } catch (err) {

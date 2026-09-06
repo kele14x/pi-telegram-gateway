@@ -46,6 +46,12 @@ WScript.Quit code
   return $template.Replace("{ROOT}", $GatewayRoot).Replace("{ROTATE}", $vbsRotate).Replace("{CMD}", $vbsCmd)
 }
 
+function Write-GatewayLauncher {
+  param([string]$Path, [string]$Content)
+  # Windows Script Host supports UTF-16 with BOM, including non-ASCII paths.
+  Set-Content -LiteralPath $Path -Value $Content -Encoding Unicode
+}
+
 if ($LibraryOnly) { return }
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -68,7 +74,7 @@ $gatewayLog = Join-Path $logDir "gateway.log"
 $cmd = Join-Path $env:SystemRoot "System32\cmd.exe"
 $vbs = New-GatewayLauncherContent -GatewayRoot $Root -NodePath $node -EntryPath $Entry `
   -RotateScriptPath $rotateScript -GatewayLogPath $gatewayLog -CmdPath $cmd
-Set-Content -Path $vbsPath -Value $vbs -Encoding ASCII
+Write-GatewayLauncher -Path $vbsPath -Content $vbs
 
 # ── Register the scheduled task ─────────────────────────────────────────────
 function XmlEscape([string]$s) {

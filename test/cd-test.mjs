@@ -5,6 +5,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parseChatMeta, serializeChatMeta } from "../chat-meta.ts";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -27,6 +28,15 @@ const assert = (cond, label) => {
   console.log(cond ? `  ✓ ${label}` : `  ✗ ${label}`);
   if (!cond) failed = true;
 };
+
+// Exercise the same metadata codec used by /cd and startup without touching
+// the gateway's real sessions directory.
+const folders = new Map([[42, "D:/synthetic-project"], [43, "D:/中文 folder"]]);
+const restored = parseChatMeta(serializeChatMeta(folders));
+assert([...folders].every(([id, cwd]) => restored.get(id) === cwd), "cwd metadata survives a restart round trip");
+const legacy = parseChatMeta('{"42":"D:/legacy","43":{"cwd":"D:/structured"},"44":null}');
+assert(legacy.get(42) === "D:/legacy" && legacy.get(43) === "D:/structured", "both existing metadata formats remain readable");
+assert(!legacy.has(44), "invalid metadata entries are ignored");
 
 const file = join(sessionsDir, "chat-42.jsonl");
 

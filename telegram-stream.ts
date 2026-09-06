@@ -21,6 +21,15 @@ const EDIT_MIN_INTERVAL_MS = 800;
 const MAX_DELIVERY_ATTEMPTS = 4;
 const TRANSIENT_RETRY_BASE_MS = 500;
 
+/** A UTF-16 boundary that never separates a surrogate pair. */
+function chunkEnd(text: string, limit: number): number {
+  let end = Math.min(limit, text.length);
+  if (end > 0 && end < text.length &&
+      text.charCodeAt(end - 1) >= 0xd800 && text.charCodeAt(end - 1) <= 0xdbff &&
+      text.charCodeAt(end) >= 0xdc00 && text.charCodeAt(end) <= 0xdfff) end--;
+  return end;
+}
+
 function log(...args: unknown[]) {
   console.log(new Date().toISOString(), ...args);
 }
@@ -154,6 +163,11 @@ export class TelegramStream {
     // exists. This also avoids a stray status-only message at exactly 3900 chars.
     this.status = "…";
     this.pending += delta;
+    this.drainPending();
+    this.scheduleEdit(false);
+  }
+
+  private drainPending(final = false) {
     // Move pending into segments immediately; full segments are sealed here so
     // their text is never clipped by Telegram's 4096-char message limit.
     while (this.pending.length > 0) {
@@ -163,12 +177,22 @@ export class TelegramStream {
         this.segments.push({ text: "", msgId: null, version: 0 });
         continue;
       }
-      const take = Math.min(room, this.pending.length);
+      let take = chunkEnd(this.pending, room);
+      // A provider delta may end halfway through an emoji. Wait for the next
+      // delta before exposing that high surrogate to Telegram.
+      const last = this.pending.charCodeAt(take - 1);
+      if (!final && take === this.pending.length && last >= 0xd800 && last <= 0xdbff) take--;
+      if (take === 0) {
+        if (room === 1 && this.pending.length > 1) {
+          this.segments.push({ text: "", msgId: null, version: 0 });
+          continue;
+        }
+        break;
+      }
       seg.text += this.pending.slice(0, take);
       seg.version++;
       this.pending = this.pending.slice(take);
     }
-    this.scheduleEdit(false);
   }
 
   private scheduleEdit(forceSoon: boolean) {
@@ -189,7 +213,7 @@ export class TelegramStream {
     const op = this.ioChain.then(async () => {
       // A newer append/status/finalize has superseded this delivery operation.
       if (this.canceled || version !== seg.version || !text) return;
-      const clipped = text.slice(0, 4096);
+      const clipped = text.slice(0, chunkEnd(text, 4096));
       for (let attempt = 1; attempt <= MAX_DELIVERY_ATTEMPTS; attempt++) {
         if (this.canceled || version !== seg.version) return;
         try {
@@ -262,6 +286,10 @@ export class TelegramStream {
   /** Finalize the run: flush everything, append `extra` if given. */
   async finalize(extra?: string) {
     if (this.finished || this.canceled) return;
+    // If a run ends with an incomplete provider delta, render a replacement
+    // character rather than sending an unpaired high surrogate.
+    if (this.pending.length === 1) this.pending = "\ufffd";
+    this.drainPending(true);
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
@@ -310,14 +338,17 @@ export class TelegramStream {
     if (lastText) {
       // First ≤4096 chars go into the open segment's message; the rest become
       // additional messages.
-      ops.push({ seg, text: lastText, version: seg.version });
-      for (let i = 4096; i < lastText.length; i += 4096) {
-        const text = lastText.slice(i, i + 4096);
+      const firstEnd = chunkEnd(lastText, 4096);
+      ops.push({ seg, text: lastText.slice(0, firstEnd), version: seg.version });
+      for (let i = firstEnd; i < lastText.length;) {
+        const end = i + chunkEnd(lastText.slice(i), 4096);
+        const text = lastText.slice(i, end);
         ops.push({
           seg: { text, msgId: null, version: 0 },
           text,
           version: 0,
         });
+        i = end;
       }
     }
 
