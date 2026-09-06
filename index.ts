@@ -10,7 +10,8 @@
  * Test: npm run selftest   (creates a session and sends one prompt, no bot)
  */
 
-import { mkdirSync, mkdtempSync, renameSync, rmSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import process from "node:process";
 import dns from "node:dns";
@@ -53,7 +54,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { createChatSettingsManager } from "./chat-settings.ts";
-import { parseChatMeta, serializeChatMeta } from "./chat-meta.ts";
+import { parseChatMeta, writeChatMeta, type ChatMetaEntry } from "./chat-meta.ts";
 import { removeChatHistory } from "./history.ts";
 import { acquireInstanceLock, type InstanceLock } from "./instance-lock.ts";
 import { SessionErrorBuffer } from "./session-errors.ts";
@@ -90,7 +91,7 @@ const ALLOWED_USER_IDS = new Set(
     .map((s) => s.trim())
     .filter(Boolean)
     .map(Number)
-    .filter((n) => Number.isFinite(n)),
+    .filter((n) => Number.isInteger(n)),
 );
 
 const DEFAULT_CWD = resolve(process.env.PI_TELEGRAM_CWD ?? process.cwd());
@@ -112,9 +113,10 @@ const CHAT_HINT = [
   "Respond conversationally: keep replies focused and reasonably short, summarize large outputs instead of dumping raw content, and use Markdown (``` fences) for code snippets.",
 ];
 
-// Per-chat state persisted across restarts (currently just the working folder).
+// Per-chat state persisted across restarts and session replacements:
+// working folder plus model/thinking preferences.
 const META_FILE = join(SESSIONS_DIR, "meta.json");
-const chatMeta = new Map<number, string>();
+const chatMeta = new Map<number, ChatMetaEntry>();
 function loadChatMeta() {
   // Remove a stale temp file left by a crash mid-save (the next save
   // overwrites it anyway, but keep the directory tidy).
@@ -130,21 +132,17 @@ function loadChatMeta() {
     return; // no meta file yet
   }
   try {
-    for (const [id, cwd] of parseChatMeta(raw)) chatMeta.set(id, cwd);
+    for (const [id, entry] of parseChatMeta(raw)) chatMeta.set(id, entry);
   } catch (err) {
-    // Don't silently drop every chat's cwd on a corrupt file — surface it.
+    // Don't silently drop every chat's state on a corrupt file — surface it.
     log(`[meta] ignoring unreadable ${META_FILE}: ${String((err as Error)?.message ?? err)}`);
   }
 }
-function saveChatMeta(chatId: number, cwd: string): boolean {
-  chatMeta.set(chatId, cwd);
+function saveChatMeta(chatId: number, patch: Partial<ChatMetaEntry>): boolean {
+  chatMeta.set(chatId, { ...chatMeta.get(chatId), ...patch });
   try {
     mkdirSync(SESSIONS_DIR, { recursive: true });
-    // Write to a temp file and rename so a crash mid-write can never leave
-    // meta.json truncated/invalid (which would reset every chat's cwd to default).
-    const tmp = `${META_FILE}.tmp`;
-    writeFileSync(tmp, serializeChatMeta(chatMeta));
-    renameSync(tmp, META_FILE);
+    writeChatMeta(META_FILE, chatMeta);
     return true;
   } catch (err) {
     log(`[meta] save failed: ${String((err as Error)?.message ?? err)}`);
@@ -212,15 +210,27 @@ async function createChatSession(chatId: number, cwd: string, sessionsDir = SESS
   const sm = SessionManager.open(sessionFile, sessionsDir, cwd);
 
   type SessionOptions = NonNullable<Parameters<typeof createAgentSession>[0]>;
+  // Per-chat preferences (bound to the chat; survive /cd, /new, and restarts)
+  // take priority over the PI_TELEGRAM_MODEL / PI_TELEGRAM_THINKING startup env.
+  const meta = chatMeta.get(chatId);
+  let cliModel = meta?.model ?? MODEL_ARG;
+  const thinkingPref = meta?.thinking ?? THINKING_ARG;
   let model: SessionOptions["model"];
-  let thinkingLevel: SessionOptions["thinkingLevel"];
-  if (MODEL_ARG) {
-    const r = resolveCliModel({ cliModel: MODEL_ARG, modelRuntime });
-    if (r.error) throw new Error(`Bad PI_TELEGRAM_MODEL: ${r.error}`);
-    model = r.model;
-    thinkingLevel = (r.thinkingLevel ?? THINKING_ARG) as SessionOptions["thinkingLevel"];
-  } else {
-    thinkingLevel = THINKING_ARG as SessionOptions["thinkingLevel"];
+  let thinkingLevel = thinkingPref as SessionOptions["thinkingLevel"];
+  if (cliModel) {
+    let r = resolveCliModel({ cliModel, modelRuntime });
+    if (r.error && meta?.model) {
+      // A stored per-chat model can outlive its catalog entry; degrade to the
+      // startup default instead of blocking the chat.
+      log(`[chat ${chatId}] stored model "${meta.model}" no longer resolves (${r.error}); using startup default`);
+      cliModel = MODEL_ARG;
+      if (cliModel) r = resolveCliModel({ cliModel, modelRuntime });
+    }
+    if (cliModel) {
+      if (r.error) throw new Error(`Bad PI_TELEGRAM_MODEL: ${r.error}`);
+      model = r.model;
+      if (r.thinkingLevel) thinkingLevel = r.thinkingLevel as SessionOptions["thinkingLevel"];
+    }
   }
 
   const { session } = await createAgentSession({
@@ -272,12 +282,6 @@ function wireSession(chatId: number, session: AgentSession, stream: TelegramStre
         stream.setStatus(`✅ ${event.toolName}${event.isError ? " ❌" : ""}`);
         break;
       }
-      case "queue_update": {
-        if (event.followUp.length > 0) {
-          void safeSend(chatId, `📥 Queued (after current task): “${event.followUp[0].slice(0, 60)}…”`);
-        }
-        break;
-      }
       case "agent_end": {
         const terminalError = errors.finishAttempt(event.willRetry);
         if (!event.willRetry) {
@@ -314,7 +318,7 @@ function ensureChat(chatId: number): ChatState {
   if (!st) {
     st = {
       chatId,
-      cwd: chatMeta.get(chatId) ?? DEFAULT_CWD,
+      cwd: chatMeta.get(chatId)?.cwd ?? DEFAULT_CWD,
       session: null,
       stream: null,
       chain: Promise.resolve(),
@@ -386,7 +390,7 @@ async function getChatSession(
             return undefined;
           }
           st.session = session;
-          st.stream = new TelegramStream(bot, chatId);
+          st.stream = new TelegramStream(bot, chatId, log);
           wireSession(chatId, session, st.stream);
           const m = session.model;
           log(
@@ -656,11 +660,11 @@ bot.command("start", async (ctx) => {
       "Commands:\n" +
       "/new — start a fresh conversation (clears history)\n" +
       "/cd <folder> — switch this chat's working folder\n" +
-      "/sessions — session info for this chat\n" +
+      "/sessions — conversation storage details for this chat\n" +
       "/model [name] — show / switch model (e.g. /model anthropic/claude-opus-4-5:high)\n" +
       "/thinking [level] — show / set thinking level (off…max)\n" +
       "/stop — abort the current run and drop queued messages\n" +
-      "/status — session info\n" +
+      "/status — show live agent activity\n" +
       "/cwd — show the current working folder\n" +
       "/help — this message",
   );
@@ -671,11 +675,11 @@ bot.command("help", async (ctx) => {
     "Just chat: send text or photos. The agent keeps a persistent conversation per chat.\n\n" +
       "/new — fresh conversation (keeps the working folder)\n" +
       "/cd <folder> — switch this chat's working folder (absolute or relative, ~ supported)\n" +
-      "/sessions — session info for this chat\n" +
+      "/sessions — conversation storage details for this chat\n" +
       "/model [name] — show or switch model\n" +
       "/thinking [level] — show or set thinking level (off/minimal/low/medium/high/xhigh/max)\n" +
       "/stop — abort the current run and drop queued messages\n" +
-      "/status — session info\n" +
+      "/status — show live agent activity\n" +
       "/cwd — show the current working folder\n" +
       "/help — this message",
   );
@@ -733,6 +737,7 @@ bot.command("model", async (ctx) => {
       if (arg === "cycle") {
         const r = await session.cycleModel();
         const m = session.model;
+        if (m) saveChatMeta(ctx.chat.id, { model: `${m.provider}/${m.id}` });
         await ctx.reply(`🔄 ${r ? "Cycled" : "No models to cycle through"} — now: ${m ? `${m.provider}/${m.id}` : "?"}`);
         return;
       }
@@ -744,7 +749,15 @@ bot.command("model", async (ctx) => {
       if (!isCurrentChat(st, generation)) return;
       await session.setModel(r.model);
       if (r.thinkingLevel) await session.setThinkingLevel(r.thinkingLevel);
-      if (isCurrentChat(st, generation)) await ctx.reply(`✓ Model set to ${r.model.provider}/${r.model.id}`);
+      const patch: Partial<ChatMetaEntry> = { model: `${r.model.provider}/${r.model.id}` };
+      if (r.thinkingLevel) patch.thinking = r.thinkingLevel;
+      const persisted = saveChatMeta(ctx.chat.id, patch);
+      if (isCurrentChat(st, generation)) {
+        await ctx.reply(
+          `✓ Model set to ${r.model.provider}/${r.model.id}` +
+            (persisted ? "" : "\n\n⚠️ Couldn't save this choice to meta.json — it will revert after a restart."),
+        );
+      }
     } catch (err) {
       if (err instanceof ChatOperationCancelled) return;
       await ctx.reply(`⚠️ ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
@@ -768,6 +781,7 @@ bot.command("thinking", async (ctx) => {
       }
       if (arg === "cycle") {
         const level = session.cycleThinkingLevel();
+        if (level) saveChatMeta(ctx.chat.id, { thinking: level });
         await ctx.reply(`🔄 thinking level: ${level}`);
         return;
       }
@@ -777,7 +791,13 @@ bot.command("thinking", async (ctx) => {
       }
       if (!isCurrentChat(st, generation)) return;
       session.setThinkingLevel(arg as (typeof THINKING_LEVELS)[number]);
-      if (isCurrentChat(st, generation)) await ctx.reply(`✓ thinking level: ${arg}`);
+      const persisted = saveChatMeta(ctx.chat.id, { thinking: arg });
+      if (isCurrentChat(st, generation)) {
+        await ctx.reply(
+          `✓ thinking level: ${arg}` +
+            (persisted ? "" : "\n\n⚠️ Couldn't save this choice to meta.json — it will revert after a restart."),
+        );
+      }
     } catch (err) {
       if (err instanceof ChatOperationCancelled) return;
       await ctx.reply(`⚠️ ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
@@ -787,7 +807,7 @@ bot.command("thinking", async (ctx) => {
 
 bot.command("stop", async (ctx) => {
   const st = chats.get(ctx.chat.id);
-  if (!st) {
+  if (!st || (st.busy === 0 && !st.session?.isStreaming)) {
     await ctx.reply("Nothing is running.");
     return;
   }
@@ -806,16 +826,16 @@ bot.command("stop", async (ctx) => {
 bot.command("status", async (ctx) => {
   const st = ensureChat(ctx.chat.id);
   if (!st.session) {
-    await ctx.reply(`No session yet — send a message to start one.\nWorking folder: ${st.cwd}`);
+    await ctx.reply(`Status: ⚪ idle\nNo session yet — send a message to start one.\nWorking folder: ${st.cwd}`);
     return;
   }
   const s = st.session;
+  const queuedPrompts = Math.max(0, st.busy - 1);
   await ctx.reply(
     `Status: ${s.isStreaming ? "🟢 working" : "⚪ idle"}\n` +
+      `Queued prompts: ${queuedPrompts}\n` +
       `Model: ${s.model ? `${s.model.provider}/${s.model.id}` : "(default)"}\n` +
       `Thinking: ${s.thinkingLevel}\n` +
-      `Messages in context: ${s.messages.length}\n` +
-      `Session file: ${s.sessionFile ?? "(none)"}\n` +
       `Working folder: ${st.cwd}`,
   );
 });
@@ -838,13 +858,13 @@ bot.command("cd", async (ctx) => {
   }
   const target = resolve(st.cwd, expandHome(raw));
   try {
-    if (!statSync(target).isDirectory()) throw new Error("not a directory");
+    if (!(await stat(target)).isDirectory()) throw new Error("not a directory");
   } catch {
     await ctx.reply(`⚠️ No such directory: ${target}`).catch(() => {});
     return;
   }
   st.cwd = target;
-  const persisted = saveChatMeta(ctx.chat.id, target);
+  const persisted = saveChatMeta(ctx.chat.id, { cwd: target });
   // Invalidate queued submissions and any in-flight session creation, so
   // nothing from the old folder runs after the switch.
   advanceChatGeneration(st);
@@ -867,7 +887,7 @@ bot.command("sessions", async (ctx) => {
   const file = s.sessionFile ?? "(none)";
   let size = "?";
   try {
-    size = `${statSync(file).size} bytes`;
+    size = `${(await stat(file)).size} bytes`;
   } catch {
     /* ignore */
   }
@@ -876,10 +896,8 @@ bot.command("sessions", async (ctx) => {
       `File: ${file}\n` +
       `Size: ${size}\n` +
       `Messages in context: ${s.messages.length}\n` +
-      `Model: ${s.model ? `${s.model.provider}/${s.model.id}` : "(default)"}\n` +
-      `Thinking: ${s.thinkingLevel}\n` +
-      `Working folder: ${st.cwd}\n\n` +
-      `Use /new for a fresh conversation (same folder), /cd <folder> to change folder.`,
+      `History: persistent for this chat\n\n` +
+      `Use /new for a fresh conversation (keeps the working folder), /cd <folder> to change folder.`,
   );
 });
 
@@ -892,10 +910,10 @@ const BOT_COMMANDS = [
   { command: "new", description: "Start a fresh conversation (keeps working folder)" },
   { command: "cd", description: "Change this chat’s working folder, e.g. /cd ~/Desktop" },
   { command: "cwd", description: "Show the current working folder" },
-  { command: "sessions", description: "Show session details for this chat" },
+  { command: "sessions", description: "Show conversation storage details" },
   { command: "model", description: "Show or switch model, e.g. /model anthropic/claude-opus-4-5:high" },
   { command: "thinking", description: "Show or set thinking level (off…max)" },
-  { command: "status", description: "Show model, context size, working folder" },
+  { command: "status", description: "Show live agent activity and queue" },
   { command: "stop", description: "Abort the current run and drop queued messages" },
 ];
 

@@ -26,7 +26,6 @@ $proc = Start-Process -FilePath $node `
   -RedirectStandardError  (Join-Path $LogDir "gateway-err.log") `
   -WindowStyle Hidden -PassThru
 
-$proc.Id | Set-Content (Join-Path $LogDir "gateway.pid")
 Write-Host ("Started gateway, PID " + $proc.Id)
 Write-Host ("Log: " + (Join-Path $LogDir "gateway.log"))
 Start-Sleep -Seconds 6

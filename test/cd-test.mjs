@@ -2,7 +2,7 @@
 // different cwd override (B) — the mechanic behind the bot's /cd command.
 // No LLM call is made (session creation only). Run: node test/cd-test.mjs
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseChatMeta, serializeChatMeta } from "../chat-meta.ts";
@@ -10,18 +10,22 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   getAgentDir,
-  createEventBus,
+  ModelRuntime,
   SettingsManager,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 
-const dirA = "C:/Users/Kele";
-const dirB = "C:/Users/Kele/pi-telegram-gateway";
-const sessionsDir = mkdtempSync(join(tmpdir(), "pi-gw-cd-"));
+const base = mkdtempSync(join(tmpdir(), "pi-gw-cd-"));
+const dirA = join(base, "folder-a");
+const dirB = join(base, "folder-b");
+const sessionsDir = join(base, "sessions");
+mkdirSync(dirA, { recursive: true });
+mkdirSync(dirB, { recursive: true });
+mkdirSync(sessionsDir, { recursive: true });
 
 const loader = new DefaultResourceLoader({ cwd: dirA, agentDir: getAgentDir() });
 await loader.reload();
-const modelRuntime = await (await import("@earendil-works/pi-coding-agent")).ModelRuntime.create();
+const modelRuntime = await ModelRuntime.create();
 
 let failed = false;
 const assert = (cond, label) => {
@@ -32,10 +36,10 @@ const assert = (cond, label) => {
 // Exercise the same metadata codec used by /cd and startup without touching
 // the gateway's real sessions directory.
 const folders = new Map([[42, "D:/synthetic-project"], [43, "D:/中文 folder"]]);
-const restored = parseChatMeta(serializeChatMeta(folders));
-assert([...folders].every(([id, cwd]) => restored.get(id) === cwd), "cwd metadata survives a restart round trip");
+const restored = parseChatMeta(serializeChatMeta(new Map([...folders].map(([id, cwd]) => [id, { cwd }]))));
+assert([...folders].every(([id, cwd]) => restored.get(id)?.cwd === cwd), "cwd metadata survives a restart round trip");
 const legacy = parseChatMeta('{"42":"D:/legacy","43":{"cwd":"D:/structured"},"44":null}');
-assert(legacy.get(42) === "D:/legacy" && legacy.get(43) === "D:/structured", "both existing metadata formats remain readable");
+assert(legacy.get(42)?.cwd === "D:/legacy" && legacy.get(43)?.cwd === "D:/structured", "both existing metadata formats remain readable");
 assert(!legacy.has(44), "invalid metadata entries are ignored");
 
 const file = join(sessionsDir, "chat-42.jsonl");
@@ -69,7 +73,7 @@ assert(typeof sB.prompt === "function" && typeof sB.abort === "function", "agent
 console.log("  cwd override active for tools:",
   JSON.stringify(sB.agent.state.tools.map((t) => t.name).slice(0, 4)));
 sB.dispose();
-rmSync(sessionsDir, { recursive: true, force: true });
+rmSync(base, { recursive: true, force: true });
 
 console.log(failed ? "\ncd-test FAILED ❌" : "\ncd-test passed ✅");
 process.exit(failed ? 1 : 0);

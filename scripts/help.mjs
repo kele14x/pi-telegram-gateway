@@ -34,14 +34,16 @@ console.log(`
 
 console.log("TELEGRAM BOT COMMANDS (send to @your_bot in chat):\n");
 const botCmds = [
+  ["/start", "welcome message and quick guide"],
+  ["/help", "show available commands"],
   ["/cd <folder>", "switch this chat's working folder"],
   ["/cwd", "show working folder"],
-  ["/sessions", "session details for this chat"],
+  ["/sessions", "conversation storage details for this chat"],
   ["/new", "fresh conversation (keeps folder)"],
   ["/model [name]", "show / switch model"],
   ["/thinking [level]", "show / set thinking level"],
   ["/stop", "abort the current run and drop queued messages"],
-  ["/status", "model, context, folder"],
+  ["/status", "live activity, prompt queue, model, folder"],
 ];
 for (const [cmd, desc] of botCmds) console.log(`  ${cmd.padEnd(18)} ${desc}`);
 

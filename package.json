@@ -14,7 +14,7 @@
     "autostart:remove": "powershell -NoProfile -ExecutionPolicy Bypass -File remove-autostart.ps1",
     "stop": "powershell -NoProfile -ExecutionPolicy Bypass -File stop.ps1",
     "selftest": "node --env-file-if-exists=.env index.ts --selftest",
-    "test": "node test/stream-test.mjs && node test/cd-test.mjs && node test/settings-test.mjs && node test/lock-test.mjs && node test/residual-test.mjs && node test/rotation-test.mjs",
+    "test": "node test/stream-test.mjs && node test/cd-test.mjs && node test/chat-meta-test.mjs && node test/settings-test.mjs && node test/lock-test.mjs && node test/residual-test.mjs && node test/rotation-test.mjs",
     "test:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File test/autostart-test.ps1",
     "status": "powershell -NoProfile -ExecutionPolicy Bypass -File status.ps1",
     "help": "node scripts/help.mjs",
