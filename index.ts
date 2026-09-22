@@ -761,7 +761,8 @@ bot.command("model", async (ctx) => {
       }
     } catch (err) {
       if (err instanceof ChatOperationCancelled) return;
-      await ctx.reply(`⚠️ ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
+      // safeSend redacts: a failed ctx.reply above can carry the token-bearing API URL.
+      await safeSend(ctx.chat.id, `⚠️ ${err instanceof Error ? err.message : String(err)}`);
     }
   });
 });
@@ -801,7 +802,8 @@ bot.command("thinking", async (ctx) => {
       }
     } catch (err) {
       if (err instanceof ChatOperationCancelled) return;
-      await ctx.reply(`⚠️ ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
+      // safeSend redacts: a failed ctx.reply above can carry the token-bearing API URL.
+      await safeSend(ctx.chat.id, `⚠️ ${err instanceof Error ? err.message : String(err)}`);
     }
   });
 });

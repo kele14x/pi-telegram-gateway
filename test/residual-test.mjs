@@ -135,4 +135,37 @@ for (const scenario of ["invalid-json", "body-stream"]) {
   assert(!logs[0].includes("synthetic-password"), "send failure exposed proxy credentials in logs");
 }
 
-console.log("Deferred-error, history-removal, and outbound-redaction regressions passed");
+// Outbound error text must pass through safeSend's redaction: a caught error can
+// carry the token-bearing Telegram API URL, so ctx.reply must never forward one.
+{
+  const referencesErr = (node) => {
+    let found = false;
+    const walk = (n) => {
+      if (found) return;
+      if (ts.isIdentifier(n) && n.text === "err") found = true;
+      else ts.forEachChild(n, walk);
+    };
+    walk(node);
+    return found;
+  };
+  const offenders = [];
+  const visit = (node) => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === "reply" &&
+      node.expression.expression.getText(ast) === "ctx" &&
+      node.arguments.some(referencesErr)
+    ) {
+      offenders.push(ast.getLineAndCharacterOfPosition(node.getStart(ast)).line + 1);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  assert(
+    offenders.length === 0,
+    `unredacted error text sent via ctx.reply at index.ts line(s) ${offenders.join(", ")} — use safeSend`,
+  );
+}
+
+console.log("Deferred-error, history-removal, outbound-redaction, and reply-redaction regressions passed");

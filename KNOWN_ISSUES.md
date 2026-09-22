@@ -39,11 +39,15 @@ and deliberately does not always agree with priority — see
 | [17](#17--low--userid-is-interpolated-unescaped-into-the-task-xml) | **P2** | Low | Ops | `<UserId>` is interpolated unescaped into the task XML |
 | [18](#18--low--log-retention-sort-uses-locale-collation) | **P2** | Low | Ops | Log-retention sort uses locale collation |
 | [19](#19--low--the-single-instance-lock-is-per-repo-not-per-bot) | **P2** | Low | Locking | The single-instance lock is per-repo, not per-bot |
+| [20](#20--high--model-and-thinking-reply-with-unredacted-error-text) | **P1** | High | Security | `/model` and `/thinking` reply with unredacted error text |
 
-**Tally:** 1 × P0 · 6 × P1 · 12 × P2
+**Tally (all 20 findings):** 1 × P0 · 7 × P1 · 12 × P2
 
-**Fixed (2026-09-22):** findings 1 and 7. **Open tally:** 0 × P0 · 6 × P1 · 11 × P2.
+**Fixed (2026-09-22):** findings 1, 7, and 20. **Open tally:** 0 × P0 · 6 × P1 · 11 × P2.
 The priority classification below records review-time impact, including fixed issues.
+
+Finding 20 was not part of the original 19 — it was found while verifying the fix
+for finding 1, by auditing every remaining outbound path for the same defect class.
 
 ---
 
@@ -75,6 +79,7 @@ Criteria used:
 | [5](#5--medium--unthrottled-this-bot-is-private-replies) | Unthrottled block replies | Abuse vector: any group member can spam the bot into a Telegram 429, degrading it for the owner. See the divergence note below. |
 | [13](#13--medium--stopps1-never-disables-the-task) | `stop.ps1` leaves the task enabled | Breaks an explicit operational contract — the script prints "Gateway stopped." and the gateway relaunches at next logon. `remove-autostart.ps1` already has the correct guard. |
 | [14](#14--medium--setup-autostartps1-reports-success-when-task-creation-fails) | False success from setup | The primary setup path reports success on failure, so autostart silently does not exist and the gateway will not survive a reboot. Also masks finding 17. |
+| [20](#20--high--model-and-thinking-reply-with-unredacted-error-text) | `/model` and `/thinking` reply unredacted | Same impact class as finding 1 (credential exposure), but needs a compound failure to trigger. **Fixed 2026-09-22.** |
 
 ### P2 — optional / improvement
 
@@ -112,9 +117,17 @@ These three are judgment calls and are the ones most worth arguing with:
   half is largely a consequence of finding 13, so fixing 13 removes most of it;
   the truncation half is a one-line guard. Promote to P1 if finding 13 is not
   fixed, since the two compound.
+- **Finding 20 is High severity but P1, not P0.** The impact is identical to
+  finding 1 — the bot token reaching a group chat — so under a strictly
+  impact-based policy it belongs in P0 beside it. It is classified P1 because the
+  trigger is a compound failure (an outbound reply must first fail with a
+  response-body error, then the retry must succeed) rather than a single routine
+  action. Moot in practice: it was fixed in the same pass.
+
 ### Suggested order of work
 
-1. **Findings 1 and 7 — done (2026-09-22).** Redaction and Unicode-safe truncation.
+1. **Findings 1, 7, and 20 — done (2026-09-22).** Redaction at every outbound
+   error path, plus Unicode-safe truncation.
 2. **Finding 14** (P1, one `if`) — cheapest P1, and it un-masks finding 17.
 3. **Finding 13** (P1) — then re-check finding 15.
 4. **Finding 2** (P1, largest change) — per-cwd loader/settings cache, plus a
@@ -559,6 +572,67 @@ within one repository copy on one machine.
 bot-scoped (e.g. a hash of the bot token) under a shared location.
 
 **Status:** open.
+
+---
+
+### 20 · High — `/model` and `/thinking` reply with unredacted error text
+
+**Where:** `index.ts:764` and `index.ts:804` (the `catch` blocks of the `/model`
+and `/thinking` handlers), as they were before the fix.
+
+Found on 2026-09-22 while verifying the fix for finding 1, by auditing every
+remaining outbound path for the same defect class.
+
+**Failure mode.** Finding 1's fix put redaction inside `safeSend()`, which is the
+choke point for the prompt/photo error paths. These two handlers did not use it —
+they replied directly:
+
+```ts
+await ctx.reply(`⚠️ ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
+```
+
+Both `try` blocks contain `ctx.reply(...)` calls of their own. If one of those
+fails with a response-body error, its message embeds the token-bearing API URL,
+the `catch` receives it, and the handler reposts it verbatim. In a group chat the
+token is then visible to every member — the same exposure as finding 1.
+
+The trigger is the same pair of vectors documented in finding 1, both of which
+escape telegraf's `redactToken` guard because `await res.json()`
+(`node_modules/telegraf/lib/core/network/client.js:312`) sits outside the
+`.catch(redactToken)` on line 304:
+
+- invalid JSON body on a status <500 response → `invalid json response body at
+  <URL>` (`node_modules/telegraf/node_modules/node-fetch/lib/index.js:273`)
+- body-stream failure after headers arrive → `Invalid response body while trying
+  to fetch <URL>` (`:400`)
+
+It is narrower than finding 1 because it needs a compound failure: the first
+reply must fail that specific way, and the retry must then succeed.
+
+Every other `ctx.reply` interpolation in `index.ts` was checked and carries only
+model ids, thinking levels, working folders, directory paths, or static text — no
+secrets. These two were the only remaining unredacted outbound error paths.
+
+**Fix applied.** Both now route through `safeSend()`, inheriting redaction and
+surrogate-safe truncation:
+
+```ts
+// safeSend redacts: a failed ctx.reply above can carry the token-bearing API URL.
+await safeSend(ctx.chat.id, `⚠️ ${err instanceof Error ? err.message : String(err)}`);
+```
+
+The trailing `.catch(() => {})` is dropped because `safeSend` already swallows and
+logs its own delivery failures. This does change reply threading — `safeSend`
+calls `sendMessage` without `ctx.reply`'s reply-to/topic context — which is
+acceptable for an error notice and consistent with every other error path in the
+gateway.
+
+A structural guard was added to `test/residual-test.mjs`: it walks the `index.ts`
+AST and fails if any `ctx.reply(...)` argument references an identifier named
+`err`, naming the offending line. Mutation-tested — reintroducing the old line
+fails the suite with exit code 1.
+
+**Status:** fixed (2026-09-22), alongside findings 1 and 7.
 
 ---
 
