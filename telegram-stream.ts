@@ -22,7 +22,7 @@ const MAX_DELIVERY_ATTEMPTS = 4;
 const TRANSIENT_RETRY_BASE_MS = 500;
 
 /** A UTF-16 boundary that never separates a surrogate pair. */
-function chunkEnd(text: string, limit: number): number {
+export function chunkEnd(text: string, limit: number): number {
   let end = Math.min(limit, text.length);
   if (end > 0 && end < text.length &&
       text.charCodeAt(end - 1) >= 0xd800 && text.charCodeAt(end - 1) <= 0xdbff &&

@@ -58,7 +58,7 @@ import { parseChatMeta, writeChatMeta, type ChatMetaEntry } from "./chat-meta.ts
 import { removeChatHistory } from "./history.ts";
 import { acquireInstanceLock, type InstanceLock } from "./instance-lock.ts";
 import { SessionErrorBuffer } from "./session-errors.ts";
-import { TelegramStream } from "./telegram-stream.ts";
+import { TelegramStream, chunkEnd } from "./telegram-stream.ts";
 
 // ── Single-instance lock ────────────────────────────────────────────────────
 // Prevents a duplicate gateway (e.g. Task Scheduler restart racing a manual
@@ -596,7 +596,8 @@ function enqueueChatOp(
 
 async function safeSend(chatId: number, text: string) {
   try {
-    await bot.telegram.sendMessage(chatId, text.slice(0, 4096));
+    const redacted = redactSecrets(text);
+    await bot.telegram.sendMessage(chatId, redacted.slice(0, chunkEnd(redacted, 4096)));
   } catch (err) {
     log(`[send] ${String((err as Error)?.message ?? err)}`);
   }
@@ -1046,7 +1047,7 @@ bot.catch((err, ctx) => {
 
 // ══════════════════════════════ Bootstrap ═════════════════════════════════
 
-/** Redact known secrets (bot token, full proxy URL) from anything we log. */
+/** Redact known secrets (bot token, full proxy URL) from logs and outbound notices. */
 function redactSecrets(text: string): string {
   let s = text;
   if (BOT_TOKEN) s = s.split(BOT_TOKEN).join("<token>");

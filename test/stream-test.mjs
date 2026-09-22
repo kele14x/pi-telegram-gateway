@@ -1,7 +1,7 @@
 // Offline test for TelegramStream using a mock bot. No Telegram or models needed.
 // Run: node test/stream-test.mjs
 
-import { TelegramStream } from "../telegram-stream.ts";
+import { TelegramStream, chunkEnd } from "../telegram-stream.ts";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -366,6 +366,16 @@ function assert(cond, label) {
     assert(posted.every(text => text.isWellFormed() && text.length <= 4096), `${mode}: all API payloads are valid and within the limit`);
     assert(finalState() === expected, `${mode}: complete content preserved`);
   }
+}
+
+{
+  console.log("O) shared truncation boundary at the Telegram message limit");
+  const astral = "\u{1D11E}";
+  assert(chunkEnd("", 4096) === 0, "empty text has an empty boundary");
+  assert(chunkEnd("short", 4096) === 5, "short text is preserved");
+  assert(chunkEnd("a".repeat(4097), 4096) === 4096, "ASCII text uses the full limit");
+  assert(chunkEnd("a".repeat(4095) + astral, 4096) === 4095, "straddling surrogate pair is excluded");
+  assert(chunkEnd("a".repeat(4094) + astral + "tail", 4096) === 4096, "fitting surrogate pair is preserved");
 }
 
 if (failures === 0) {

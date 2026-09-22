@@ -42,6 +42,9 @@ and deliberately does not always agree with priority — see
 
 **Tally:** 1 × P0 · 6 × P1 · 12 × P2
 
+**Fixed (2026-09-22):** findings 1 and 7. **Open tally:** 0 × P0 · 6 × P1 · 11 × P2.
+The priority classification below records review-time impact, including fixed issues.
+
 ---
 
 ## Priority classification (P0/P1/P2)
@@ -109,10 +112,9 @@ These three are judgment calls and are the ones most worth arguing with:
   half is largely a consequence of finding 13, so fixing 13 removes most of it;
   the truncation half is a one-line guard. Promote to P1 if finding 13 is not
   fixed, since the two compound.
-
 ### Suggested order of work
 
-1. **Finding 1** (P0, one line) — and fold **finding 7** into the same edit.
+1. **Findings 1 and 7 — done (2026-09-22).** Redaction and Unicode-safe truncation.
 2. **Finding 14** (P1, one `if`) — cheapest P1, and it un-masks finding 17.
 3. **Finding 13** (P1) — then re-check finding 15.
 4. **Finding 2** (P1, largest change) — per-cwd loader/settings cache, plus a
@@ -128,33 +130,40 @@ These three are judgment calls and are the ones most worth arguing with:
 
 **Where:** `index.ts:597` (`safeSend`), reached from `index.ts:524`.
 
-**Failure mode.** `safeSend()` sends text verbatim; only `log()` runs
-`redactSecrets()`. telegraf bundles node-fetch v2, which formats transport
-failures as `` `request to ${request.url} failed, reason: ${err.message}` ``
-(`node_modules/telegraf/node_modules/node-fetch/lib/index.js:1501`), and that
-URL is `https://api.telegram.org/bot<TOKEN>/getFile`.
+**Failure mode (before the fix).** `safeSend()` forwarded text verbatim;
+only `log()` ran `redactSecrets()`. Response errors from Telegraf's bundled
+node-fetch v2 can include `https://api.telegram.org/bot<TOKEN>/getFile`.
 
-Path: a photo arrives → `ctx.telegram.getFileLink()` (`index.ts:1016`) hits a
-network blip → `imageLoad` captures the `FetchError` (`index.ts:502-505`) →
-`index.ts:524` sends `⚠️ Couldn't process the photo: ${msg}` straight to the
-chat. **In a group chat `chatId` is the group id**, so the token is posted where
-every member can see it, and it then persists in Telegram's cloud and chat
-history. This contradicts AGENTS.md rule 1 ("never echo the token").
+**Verification correction (2026-09-22).** The original connection/socket-failure
+example was inaccurate: Telegraf 4.16.3 redacts initial fetch failures via
+`.catch(redactToken)` (`node_modules/telegraf/lib/core/network/client.js:304`).
+However, `res.json()` at line 312 is outside that protection. Invalid JSON in a
+response with status below 500, or a response-body stream failure after headers
+arrive, can include the full URL in the resulting error
+(`node_modules/telegraf/node_modules/node-fetch/lib/index.js:273`, `:400`).
+Both paths reproduced the token leak offline with a synthetic token.
 
-The same unredacted path is shared by the other `⚠️ ${msg}` sends
-(`index.ts:540`, `570`, `763`, `803`), where the leaking value is a
-provider/SDK error rather than a Telegram one — lower risk, same fix.
+Path: an allowed user sends a photo → `ctx.telegram.getFileLink()` receives a
+response-parsing/body error → `imageLoad` captures it (`index.ts:502-505`) →
+`index.ts:524` passes its message to `safeSend()`. If the subsequent send
+succeeds, **every member of the originating group can see the token**, not just
+the allowed sender. This violates AGENTS.md rule 1 ("never echo the token").
 
-**Suggested fix.** Redact inside `safeSend` so every call site is covered:
+**Fix applied.** Redact known secrets at the shared `safeSend()` boundary before
+truncating, including tokens that straddle the original 4096-character cutoff:
 
 ```ts
-await bot.telegram.sendMessage(chatId, redactSecrets(text).slice(0, 4096));
+const redacted = redactSecrets(text);
+await bot.telegram.sendMessage(chatId, redacted.slice(0, chunkEnd(redacted, 4096)));
 ```
 
-`redactSecrets` is a hoisted function declaration, so calling it from the
-earlier-defined `safeSend` is fine.
+The exported `chunkEnd()` also prevents splitting surrogate pairs (finding 7).
+`test/residual-test.mjs` exercises the actual photo-error handlers with bundled
+node-fetch JSON/body errors, mocked delivery, and synthetic credentials. It also
+covers repeated tokens, proxy credentials, truncation ordering, Unicode
+boundaries, and redacted logging when delivery fails; no Telegram calls are made.
 
-**Status:** open.
+**Status:** fixed (2026-09-22).
 
 ---
 
@@ -289,17 +298,17 @@ backing off.
 
 ### 7 · Low — `safeSend` slices on a raw UTF-16 boundary
 
-**Where:** `index.ts:599`.
+**Where:** `index.ts:597` (`safeSend`).
 
-`text.slice(0, 4096)` can split a surrogate pair, producing a payload Telegram
-rejects. This is exactly the hazard `chunkEnd()` exists to prevent
-(`telegram-stream.ts:25-31`), and it is reachable whenever an error message
-exceeds 4096 chars (a long stack rendered into `⚠️ ${msg}`).
+Before the fix, `text.slice(0, 4096)` could split a surrogate pair, producing
+an invalid Telegram payload when a long error straddled the cutoff.
 
-**Suggested fix.** Export `chunkEnd` from `telegram-stream.ts` and use it here.
-Combine with finding 1 — both changes touch the same line.
+**Fix applied.** Exported `chunkEnd()` from `telegram-stream.ts` and used it in
+`safeSend()` after redaction. `test/stream-test.mjs` tests the shared helper at
+4096 characters, and `test/residual-test.mjs` checks outbound payloads,
+including a surrogate boundary shifted by redaction.
 
-**Status:** open.
+**Status:** fixed (2026-09-22), alongside finding 1.
 
 ---
 
