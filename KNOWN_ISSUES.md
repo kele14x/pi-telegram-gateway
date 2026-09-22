@@ -1,6 +1,6 @@
 # Known issues
 
-Findings from a full code-base review on 2026-09-10, covering the TypeScript
+Findings from a full code-base review, covering the TypeScript
 core (`index.ts`, `telegram-stream.ts`, `chat-*.ts`, `history.ts`,
 `instance-lock.ts`, `session-errors.ts`, `scripts/`, `test/`) and the Windows
 ops scripts (`setup-autostart.ps1`, `remove-autostart.ps1`,
@@ -10,8 +10,8 @@ Baseline at review time: `npm run typecheck` and `npm test` both pass, and a
 scan of the working tree and every commit in history found no bot-token-shaped
 strings.
 
-Numbering below matches the review conversation. Each entry records the failure
-mode, the evidence, and a suggested fix. **Status** is `open` unless noted.
+Numbering is retained from the review conversations. The tables below list only
+open findings.
 
 Priority is the triage bucket (**P0** blocking/security · **P1** critical, must
 be solved · **P2** optional/improvement). Severity is the raw impact assessment
@@ -20,13 +20,11 @@ and deliberately does not always agree with priority — see
 
 | # | Priority | Severity | Area | Summary |
 | --- | --- | --- | --- | --- |
-| [1](#1--high--bot-token-can-be-posted-into-a-telegram-chat) | **P0** | High | Security | Bot token can be sent into a Telegram chat via an unredacted error message |
 | [2](#2--high--cd-moves-the-tools-but-leaves-the-system-prompt-describing-the-launch-folder) | **P1** | High | Sessions | `/cd` moves the tools but leaves the system prompt describing the launch folder |
 | [3](#3--medium--cd-silently-discards-queued-messages) | **P1** | Medium | Commands | `/cd` silently discards queued messages |
 | [4](#4--medium--shutdown-truncates-in-flight-replies) | **P1** | Medium | Lifecycle | `shutdown()` truncates in-flight replies |
 | [5](#5--medium--unthrottled-this-bot-is-private-replies) | **P1** | Medium | Security | Unthrottled "This bot is private" replies |
 | [6](#6--medium--withretry-has-no-backoff) | **P2** | Medium | Networking | `withRetry` has no backoff despite its name and comment |
-| [7](#7--low--safesend-slices-on-a-raw-utf-16-boundary) | **P2** | Low | Delivery | `safeSend` slices on a raw UTF-16 boundary |
 | [8](#8--low--model-and-thinking-create-a-session-just-to-read-state) | **P2** | Low | Commands | `/model` and `/thinking` create a session just to read state |
 | [9](#9--low--stale-queued-commands-vanish-without-feedback) | **P2** | Low | Commands | Stale queued commands vanish without feedback |
 | [10](#10--low--instance-lock-compromise-crashes-via-an-uncaught-throw) | **P2** | Low | Locking | Instance-lock compromise crashes via an uncaught throw |
@@ -39,15 +37,10 @@ and deliberately does not always agree with priority — see
 | [17](#17--low--userid-is-interpolated-unescaped-into-the-task-xml) | **P2** | Low | Ops | `<UserId>` is interpolated unescaped into the task XML |
 | [18](#18--low--log-retention-sort-uses-locale-collation) | **P2** | Low | Ops | Log-retention sort uses locale collation |
 | [19](#19--low--the-single-instance-lock-is-per-repo-not-per-bot) | **P2** | Low | Locking | The single-instance lock is per-repo, not per-bot |
-| [20](#20--high--model-and-thinking-reply-with-unredacted-error-text) | **P1** | High | Security | `/model` and `/thinking` reply with unredacted error text |
+| [21](#21--low--command-error-replies-lose-the-forum-topic) | **P2** | Low | Delivery | `/model` and `/thinking` error replies lose the forum topic |
+| [22](#22--low--command-error-redaction-tests-only-check-an-identifier-name) | **P2** | Low | Tests | Command-error redaction tests only check an identifier name |
 
-**Tally (all 20 findings):** 1 × P0 · 7 × P1 · 12 × P2
-
-**Fixed (2026-09-22):** findings 1, 7, and 20. **Open tally:** 0 × P0 · 6 × P1 · 11 × P2.
-The priority classification below records review-time impact, including fixed issues.
-
-Finding 20 was not part of the original 19 — it was found while verifying the fix
-for finding 1, by auditing every remaining outbound path for the same defect class.
+**Open tally (19 findings):** 0 × P0 · 6 × P1 · 13 × P2.
 
 ---
 
@@ -65,9 +58,7 @@ Criteria used:
 
 ### P0 — fix before pushing
 
-| # | Finding | Why P0 |
-| --- | --- | --- |
-| [1](#1--high--bot-token-can-be-posted-into-a-telegram-chat) | Token posted into a Telegram chat | Credential exposure. In a group the token becomes visible to every member and persists in Telegram's cloud. Violates AGENTS.md rule 1. One-line fix. |
+No open P0 findings.
 
 ### P1 — must be solved
 
@@ -79,24 +70,24 @@ Criteria used:
 | [5](#5--medium--unthrottled-this-bot-is-private-replies) | Unthrottled block replies | Abuse vector: any group member can spam the bot into a Telegram 429, degrading it for the owner. See the divergence note below. |
 | [13](#13--medium--stopps1-never-disables-the-task) | `stop.ps1` leaves the task enabled | Breaks an explicit operational contract — the script prints "Gateway stopped." and the gateway relaunches at next logon. `remove-autostart.ps1` already has the correct guard. |
 | [14](#14--medium--setup-autostartps1-reports-success-when-task-creation-fails) | False success from setup | The primary setup path reports success on failure, so autostart silently does not exist and the gateway will not survive a reboot. Also masks finding 17. |
-| [20](#20--high--model-and-thinking-reply-with-unredacted-error-text) | `/model` and `/thinking` reply unredacted | Same impact class as finding 1 (credential exposure), but needs a compound failure to trigger. **Fixed 2026-09-22.** |
 
 ### P2 — optional / improvement
 
 | # | Finding | Why P2 |
 | --- | --- | --- |
 | [6](#6--medium--withretry-has-no-backoff) | `withRetry` has no backoff | Behaviour is acceptable; only the comment and function name mislead. |
-| [7](#7--low--safesend-slices-on-a-raw-utf-16-boundary) | `safeSend` surrogate split | Needs an error message over 4096 chars that also straddles a surrogate pair. **Free to fix alongside finding 1 — same line.** |
 | [8](#8--low--model-and-thinking-create-a-session-just-to-read-state) | Read-only commands create a session | Wasteful, not incorrect. |
 | [9](#9--low--stale-queued-commands-vanish-without-feedback) | Dropped commands get no reply | UX polish; the drop itself is intentional. |
 | [10](#10--low--instance-lock-compromise-crashes-via-an-uncaught-throw) | Lock compromise crashes unlogged | Already fail-closed, which is the correct outcome for rule 2. Only diagnosability is missing. |
-| [11](#11--low--documentation-drift) | Doc drift | Docs only. Revisit after findings 1 and 2 land. |
+| [11](#11--low--documentation-drift) | Doc drift | Docs only. Revisit after finding 2 lands. |
 | [12](#12--low--lock-and-log-location-is-not-configurable) | Hardcoded `logs/` path | Possibly intentional — the ops scripts depend on this exact location. |
 | [15](#15--medium--start-gatewayps1-can-truncate-an-un-rotated-log-and-fights-the-task) | Log truncation + task conflict | See the divergence note below. |
 | [16](#16--low--statusps1-can-abort-on-a-corrupt-lock) | `status.ps1` aborts on garbage lock | Diagnostic tool only; needs an already-corrupt lock file. |
 | [17](#17--low--userid-is-interpolated-unescaped-into-the-task-xml) | Unescaped `<UserId>` | Needs `&`, `<`, or `>` in a Windows logon name — practically impossible. |
 | [18](#18--low--log-retention-sort-uses-locale-collation) | Locale-dependent retention sort | Retention count is already correct; theoretical mis-ordering only. |
 | [19](#19--low--the-single-instance-lock-is-per-repo-not-per-bot) | Lock is per-repo, not per-bot | Requires two checkouts pointed at one token — outside the documented single-machine deployment. Silent message loss if it happens, so worth documenting even if not fixed. |
+| [21](#21--low--command-error-replies-lose-the-forum-topic) | Command errors lose their topic | Diagnostic replies move out of the originating forum topic; the token-leak fix remains effective. |
+| [22](#22--low--command-error-redaction-tests-only-check-an-identifier-name) | Fragile redaction regression guard | A coverage gap, not a demonstrated token leak in the current handlers. |
 
 ### Where severity and priority diverge
 
@@ -117,68 +108,21 @@ These three are judgment calls and are the ones most worth arguing with:
   half is largely a consequence of finding 13, so fixing 13 removes most of it;
   the truncation half is a one-line guard. Promote to P1 if finding 13 is not
   fixed, since the two compound.
-- **Finding 20 is High severity but P1, not P0.** The impact is identical to
-  finding 1 — the bot token reaching a group chat — so under a strictly
-  impact-based policy it belongs in P0 beside it. It is classified P1 because the
-  trigger is a compound failure (an outbound reply must first fail with a
-  response-body error, then the retry must succeed) rather than a single routine
-  action. Moot in practice: it was fixed in the same pass.
 
 ### Suggested order of work
 
-1. **Findings 1, 7, and 20 — done (2026-09-22).** Redaction at every outbound
-   error path, plus Unicode-safe truncation.
-2. **Finding 14** (P1, one `if`) — cheapest P1, and it un-masks finding 17.
-3. **Finding 13** (P1) — then re-check finding 15.
-4. **Finding 2** (P1, largest change) — per-cwd loader/settings cache, plus a
+1. **Finding 14** (P1, one `if`) — cheapest P1, and it un-masks finding 17.
+2. **Finding 13** (P1) — then re-check finding 15.
+3. **Finding 2** (P1, largest change) — per-cwd loader/settings cache, plus a
    `test/cd-test.mjs` assertion so it cannot regress.
-5. **Findings 3 and 4** (P1) — both are small, localised changes in `index.ts`.
+4. **Findings 3 and 4** (P1) — both are small, localised changes in `index.ts`.
+5. **Findings 21 and 22** (P2) — preserve command-error topic routing and cover
+   both handlers with behavioural tests.
 6. **Finding 11** last, so the docs describe the post-fix behaviour.
 
 ---
 
 ## High
-
-### 1 · High — Bot token can be posted into a Telegram chat
-
-**Where:** `index.ts:597` (`safeSend`), reached from `index.ts:524`.
-
-**Failure mode (before the fix).** `safeSend()` forwarded text verbatim;
-only `log()` ran `redactSecrets()`. Response errors from Telegraf's bundled
-node-fetch v2 can include `https://api.telegram.org/bot<TOKEN>/getFile`.
-
-**Verification correction (2026-09-22).** The original connection/socket-failure
-example was inaccurate: Telegraf 4.16.3 redacts initial fetch failures via
-`.catch(redactToken)` (`node_modules/telegraf/lib/core/network/client.js:304`).
-However, `res.json()` at line 312 is outside that protection. Invalid JSON in a
-response with status below 500, or a response-body stream failure after headers
-arrive, can include the full URL in the resulting error
-(`node_modules/telegraf/node_modules/node-fetch/lib/index.js:273`, `:400`).
-Both paths reproduced the token leak offline with a synthetic token.
-
-Path: an allowed user sends a photo → `ctx.telegram.getFileLink()` receives a
-response-parsing/body error → `imageLoad` captures it (`index.ts:502-505`) →
-`index.ts:524` passes its message to `safeSend()`. If the subsequent send
-succeeds, **every member of the originating group can see the token**, not just
-the allowed sender. This violates AGENTS.md rule 1 ("never echo the token").
-
-**Fix applied.** Redact known secrets at the shared `safeSend()` boundary before
-truncating, including tokens that straddle the original 4096-character cutoff:
-
-```ts
-const redacted = redactSecrets(text);
-await bot.telegram.sendMessage(chatId, redacted.slice(0, chunkEnd(redacted, 4096)));
-```
-
-The exported `chunkEnd()` also prevents splitting surrogate pairs (finding 7).
-`test/residual-test.mjs` exercises the actual photo-error handlers with bundled
-node-fetch JSON/body errors, mocked delivery, and synthetic credentials. It also
-covers repeated tokens, proxy credentials, truncation ordering, Unicode
-boundaries, and redacted logging when delivery fails; no Telegram calls are made.
-
-**Status:** fixed (2026-09-22).
-
----
 
 ### 2 · High — `/cd` moves the tools but leaves the system prompt describing the launch folder
 
@@ -308,22 +252,6 @@ backing off.
 ---
 
 ## Low
-
-### 7 · Low — `safeSend` slices on a raw UTF-16 boundary
-
-**Where:** `index.ts:597` (`safeSend`).
-
-Before the fix, `text.slice(0, 4096)` could split a surrogate pair, producing
-an invalid Telegram payload when a long error straddled the cutoff.
-
-**Fix applied.** Exported `chunkEnd()` from `telegram-stream.ts` and used it in
-`safeSend()` after redaction. `test/stream-test.mjs` tests the shared helper at
-4096 characters, and `test/residual-test.mjs` checks outbound payloads,
-including a surrogate boundary shifted by redaction.
-
-**Status:** fixed (2026-09-22), alongside finding 1.
-
----
 
 ### 8 · Low — `/model` and `/thinking` create a session just to read state
 
@@ -575,127 +503,42 @@ bot-scoped (e.g. a hash of the bot token) under a shared location.
 
 ---
 
-### 20 · High — `/model` and `/thinking` reply with unredacted error text
+### 21 · Low — Command error replies lose the forum topic
 
-**Where:** `index.ts:764` and `index.ts:804` (the `catch` blocks of the `/model`
-and `/thinking` handlers), as they were before the fix.
+**Where:** `index.ts:765`, `index.ts:806`, and `safeSend()` at `index.ts:597-600`.
 
-Found on 2026-09-22 while verifying the fix for finding 1, by auditing every
-remaining outbound path for the same defect class.
+Commit `aeaa467` routes `/model` and `/thinking` caught errors through `safeSend()`.
+This fixes token exposure, but unlike `ctx.reply()`, that helper does not forward
+`message_thread_id`. Error notices therefore no longer target the command's
+originating forum topic. The earlier description accepted this as a tradeoff;
+it is an avoidable delivery regression, not a requirement of redaction.
 
-**Failure mode.** Finding 1's fix put redaction inside `safeSend()`, which is the
-choke point for the prompt/photo error paths. These two handlers did not use it —
-they replied directly:
+**Evidence.** Offline before/after execution of both handlers with Telegraf's
+real `Context` and mocked delivery preserved synthetic thread id `77` before the
+change and omitted it afterwards. Both session-creation and reply-failure paths
+were checked; the current handlers successfully redacted the synthetic token.
 
-```ts
-await ctx.reply(`⚠️ ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
-```
+**Suggested fix.** Preserve the originating topic ID when sending command errors,
+without bypassing `safeSend()`'s redaction and Unicode-safe truncation. Cover
+forum-topic and ordinary-chat delivery in the tests described in finding 22.
 
-Both `try` blocks contain `ctx.reply(...)` calls of their own. If one of those
-fails with a response-body error, its message embeds the token-bearing API URL,
-the `catch` receives it, and the handler reposts it verbatim. In a group chat the
-token is then visible to every member — the same exposure as finding 1.
-
-The trigger is the same pair of vectors documented in finding 1, both of which
-escape telegraf's `redactToken` guard because `await res.json()`
-(`node_modules/telegraf/lib/core/network/client.js:312`) sits outside the
-`.catch(redactToken)` on line 304:
-
-- invalid JSON body on a status <500 response → `invalid json response body at
-  <URL>` (`node_modules/telegraf/node_modules/node-fetch/lib/index.js:273`)
-- body-stream failure after headers arrive → `Invalid response body while trying
-  to fetch <URL>` (`:400`)
-
-It is narrower than finding 1 because it needs a compound failure: the first
-reply must fail that specific way, and the retry must then succeed.
-
-Every other `ctx.reply` interpolation in `index.ts` was checked and carries only
-model ids, thinking levels, working folders, directory paths, or static text — no
-secrets. These two were the only remaining unredacted outbound error paths.
-
-**Fix applied.** Both now route through `safeSend()`, inheriting redaction and
-surrogate-safe truncation:
-
-```ts
-// safeSend redacts: a failed ctx.reply above can carry the token-bearing API URL.
-await safeSend(ctx.chat.id, `⚠️ ${err instanceof Error ? err.message : String(err)}`);
-```
-
-The trailing `.catch(() => {})` is dropped because `safeSend` already swallows and
-logs its own delivery failures. This does change reply threading — `safeSend`
-calls `sendMessage` without `ctx.reply`'s reply-to/topic context — which is
-acceptable for an error notice and consistent with every other error path in the
-gateway.
-
-A structural guard was added to `test/residual-test.mjs`: it walks the `index.ts`
-AST and fails if any `ctx.reply(...)` argument references an identifier named
-`err`, naming the offending line. Mutation-tested — reintroducing the old line
-fails the suite with exit code 1.
-
-**Status:** fixed (2026-09-22), alongside findings 1 and 7.
+**Status:** open (P2).
 
 ---
 
-## Reviewed and found correct
+### 22 · Low — Command error redaction tests only check an identifier name
 
-Recorded so future reviews do not re-litigate these.
+**Where:** `test/residual-test.mjs:138-168`.
 
-**Streaming (`telegram-stream.ts`).** The strongest file in the codebase. The
-serialized `ioChain`, per-segment `version` counters, and per-run segment
-snapshots correctly handle overlapping flush/finalize/reset races. All 14
-offline scenarios in `test/stream-test.mjs` pass, including surrogate-pair
-boundaries across streaming and finalization, stale-429-retry invalidation, and
-the exact 3900-char chunk boundary. `flush()` rejections are handled by the
-`activeFlushes` entry (`:278-281`), so `void this.flush()` cannot become an
-unhandled rejection.
+The AST guard rejects `ctx.reply(...)` arguments referencing an identifier
+literally named `err`; it does not execute `/model` or `/thinking`. Renaming or
+aliasing the caught error, or omitting error delivery entirely, can pass the guard.
+This is a regression-coverage gap, not a demonstrated token leak in the current
+handlers. The existing photo-error and shared `safeSend()` tests remain useful.
 
-**Cancellation.** The generation-token design — `advanceChatGeneration`,
-`isCurrentChat`, and the `preflightResult` hook (`index.ts:551-556`) — closes the
-cancellation gaps properly, including the in-flight-session-creation race
-(`index.ts:385-403`), which self-discards a superseded session rather than
-wiring a stale cwd into live state.
+**Suggested fix.** Add offline behavioural tests for both command handlers. Force
+session-creation and reply failures containing synthetic secrets, then assert
+redacted delivery to the correct chat and originating forum topic. Keep the AST
+guard as supplemental protection rather than the sole command-error test.
 
-**Session replacement.** `replaceChatSession`'s gate/result split
-(`index.ts:454-465`) is subtle but correct: `result` can never become an
-unhandled rejection because `gate` attaches a handler to it, and the gate always
-settles successfully so later prompts can reopen retained history. `void
-replaceChatSession(st, false)` at `index.ts:872` is therefore safe.
-
-**Metadata persistence.** `chat-meta.ts` writes via temp file + `renameSync`
-(same directory, so atomic), `loadChatMeta` clears a crash-left `.tmp` and
-surfaces corruption instead of silently resetting every chat, and both legacy
-string-valued and structured entries parse.
-
-**Command synchronisation (AGENTS.md rule 5).** All 10 commands are in sync
-across the handlers, `KNOWN_COMMANDS`, `BOT_COMMANDS`, the `/start` and `/help`
-texts, the `README.md` table, and `scripts/help.mjs`.
-
-**Ops scripts — deletion safety.** Every `Remove-Item` is scoped to lock files
-under `logs\` (guarded by `StartsWith($LogsRoot)`, e.g. `stop.ps1:81-86`,
-`remove-autostart.ps1:126-143`) or to a file named exactly `gateway-hidden.vbs`
-(`remove-autostart.ps1:246-247`). Nothing touches `.env`, `sessions/`, or
-`*.log`.
-
-**Ops scripts — quoting.** The VBS launcher doubles `"` correctly, and the
-`cmd /d /s /c ""NODE" …"` leading-double-quote trick survives `/s`'s
-strip-first/last-quote rule. Apostrophes are safe inside VBS/cmd quoted strings.
-`test/autostart-test.ps1:42-60` exercises paths containing spaces end-to-end.
-
-**Ops scripts — cross-repo removal.** `remove-autostart.ps1` reads the
-registered task XML and derives the old launcher/root (`Get-TaskLauncher`,
-`:23-52`), refusing to act (`throw`, `:189-190`) when the action is not a
-verifiable `gateway-hidden.vbs`. A task registered from a different repository
-path is therefore removable without deleting config, data, or logs.
-
-**Ops scripts — idempotency.** Setup-twice (remove-then-recreate, `:63`),
-remove-twice, and remove-when-nothing-was-installed all no-op cleanly.
-
-**Ops scripts — lock cleanup.** `stop.ps1` removes `gateway.instance.lock` and
-`gateway.lock` only when the recorded owner PID is gone *and* `entry` matches, so
-a stopped gateway does not leave a stale lock blocking the next start, and a
-foreign gateway's artifacts are never removed.
-
-**Repo hygiene.** Only `.env.example` (with empty values) is tracked; `.env`,
-`sessions/`, `logs/`, `*.log`, and the generated `gateway-hidden.vbs` are all
-gitignored. No bot-token-shaped strings appear in the working tree or in any
-commit in history.
+**Status:** open (P2).
