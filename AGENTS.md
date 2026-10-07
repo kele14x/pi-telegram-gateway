@@ -65,6 +65,8 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 | `session-errors.ts` | defers assistant error rendering until `agent_end` determines whether the attempt will retry |
 | `telegram-stream.ts` | `TelegramStream`: live edits, chunking >3900 chars, ~800 ms edit throttle, 429 retry (retry-after honored, cap 30 s) |
 | `scripts/rotate-logs.mjs` | archives non-empty logs before managed launches and retains 20 archives per log type |
+| `scripts/service.mjs` | OS-aware npm lifecycle dispatch: Windows task scripts or Linux user-service manager |
+| `scripts/linux-service.mjs` | safely installs/removes a per-user systemd unit; login startup, crash recovery, child-process cleanup, no embedded credentials |
 | `setup-autostart.ps1` | safely replaces and registers Windows Scheduled Task `pi-telegram-gateway` (logon start, crash-restart, hidden window via generated `gateway-hidden.vbs`) |
 | `remove-autostart.ps1` | idempotent task/launcher cleanup; reads the existing task XML so a task registered from an old repo path can be removed safely without deleting config/data/logs |
 | `start-gateway.ps1` / `stop.ps1` / `status.ps1` | manual start (detached), clean stop (kills leaked task tree), status overview |
@@ -138,6 +140,12 @@ Model credentials come from `~/.pi/agent/` — never embed keys in code.
     shell access to the machine (public repo; supply-chain caution).
 - Runs on Windows (paths, PowerShell scripts); keep cross-platform where free,
   but never break Windows behavior (hidden-window task scripts).
+- **Linux ops:** the same `autostart:setup`, `start:daemon`, `stop`, `status`,
+  and `autostart:remove` npm commands use `systemctl --user` (no sudo).
+  Setup enables login startup without starting the bot; optional user lingering
+  allows boot startup and operation after logout. `test/service-test.mjs` uses
+  a fake service manager and temporary files; never install/start a real unit
+  merely to run tests. Stop foreground `npm start` with Ctrl+C.
 
 ## Repo hygiene
 

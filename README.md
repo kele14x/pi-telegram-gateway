@@ -91,7 +91,53 @@ The bot's command menu (`/` button) is synced automatically at startup via
 | `PI_TELEGRAM_IPV4_ONLY` | `false` | IPv4-first DNS + IPv4-only Telegram agent; enable only if broken IPv6 stalls calls (node-fetch v2 has no happy-eyeballs) |
 | `PI_TELEGRAM_DROP_PENDING_UPDATES` | `false` | discard updates received while the gateway was offline; opt in only when abandoning that backlog intentionally |
 
-## 🪟 Autostart (Windows)
+## 🔄 Background operation and autostart
+
+The npm lifecycle commands choose Windows Task Scheduler or a Linux systemd
+user service automatically:
+
+```bash
+npm run autostart:setup   # register/refresh autostart; does not start the bot
+npm run start:daemon     # start the registered task/service now
+npm run status           # inspect task/service status
+npm run stop             # stop the managed gateway and its child processes
+npm run autostart:remove # stop and remove autostart; keep config/data/logs
+```
+
+Foreground operation remains `npm start`; stop it with Ctrl+C. Managed startup
+requires Task Scheduler on Windows or a working systemd user manager on Linux.
+On other operating systems or containers without systemd, use `npm start`.
+
+### Linux
+
+Run `npm run autostart:setup` as your normal user, without `sudo`. It writes
+`~/.config/systemd/user/pi-telegram-gateway.service` (or
+`$XDG_CONFIG_HOME/systemd/user/pi-telegram-gateway.service`) and enables it for
+login startup. Start it immediately with `npm run start:daemon`. The service
+restarts 1 minute after a failure and stops all child processes, including
+agent tools, on `npm run stop`.
+
+Node loads `.env` from the repository; credentials are never copied into the
+unit. The service uses your existing pi configuration in `~/.pi/agent`, pins
+the absolute Node and repository paths, and preserves the PATH available at
+setup time. Put proxy configuration in `.env` so the service receives it even
+when the user manager has a different environment from your shell.
+
+Logs go to `logs/gateway.log` and `logs/gateway-err.log`, with the same bounded
+pre-launch rotation as Windows. `npm run status` shows service state and PID;
+it does not print conversation history or log contents on Linux.
+
+Re-run setup after moving the repo, changing your PATH, or upgrading Node.
+Refreshing an existing service stops it; run `npm run start:daemon` afterward.
+Removal stops the registered service even when it points at an older repo
+location. Unrelated unit files and symlinks are rejected rather than replaced.
+
+User services normally run while your login session is active. To keep the bot
+running after logout and start it at boot, optionally enable lingering with
+`loginctl enable-linger "$USER"` (your system may require administrator
+authorization). See [systemd user lingering](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html#enable-linger%20%5BUSER%E2%80%A6%5D).
+
+### Windows
 
 A Scheduled Task keeps the gateway alive across logons and crashes:
 
@@ -100,10 +146,10 @@ A Scheduled Task keeps the gateway alive across logons and crashes:
 npm run autostart:setup
 
 # start it right now
-schtasks /Run /TN "pi-telegram-gateway"
+npm run start:daemon
 
 # check status
-schtasks /Query /TN "pi-telegram-gateway"
+npm run status
 
 # stop and remove the task + generated launcher (keeps config/data/logs)
 npm run autostart:remove
@@ -187,6 +233,8 @@ instance-lock.ts     atomic heartbeat-backed process lock
 session-errors.ts    terminal-vs-retry model error buffering
 telegram-stream.ts   live streaming + chunking into editable messages
 scripts/rotate-logs.mjs  bounded pre-launch log rotation
+scripts/service.mjs      OS-aware lifecycle command dispatch
+scripts/linux-service.mjs  systemd user-service setup and management
 test/                offline tests
 sessions/            per-chat session files (gitignored)
 ```
