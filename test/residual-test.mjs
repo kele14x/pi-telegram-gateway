@@ -53,7 +53,7 @@ function assert(condition, message) {
 // Extract the real handlers without running bootstrap or loading owner credentials.
 const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
 const ast = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-const names = new Set(["submitPrompt", "enqueueChatJob", "safeSend", "redactSecrets", "proxyOrigin", "log", "withRetry"]);
+const names = new Set(["submitPrompt", "enqueueChatJob", "safeSend", "trackDelivery", "redactSecrets", "proxyOrigin", "log", "withRetry"]);
 const handlers = ast.statements.filter(node => ts.isFunctionDeclaration(node) && names.has(node.name?.text));
 assert(handlers.length === names.size, "gateway regression handlers could not be found");
 const code = ts.transpileModule(handlers.map(node => node.getText(ast)).join("\n"), {
@@ -82,6 +82,7 @@ function makeGateway() {
   };
   const bot = { telegram: { sendMessage: async (chatId, text) => sent.push({ chatId, text }) } };
   const context = vm.createContext({
+    shuttingDown: false, pendingDeliveries: new Set(),
     Error, BOT_TOKEN: token, PROXY_URL: proxy, URL, bot, chunkEnd: stream.chunkEnd,
     console: {
       log: (...args) => logs.push(format(...args)),

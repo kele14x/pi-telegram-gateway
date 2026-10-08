@@ -109,6 +109,13 @@ Foreground operation remains `npm start`; stop it with Ctrl+C. Managed startup
 requires Task Scheduler on Windows or a working systemd user manager on Linux.
 On other operating systems or containers without systemd, use `npm start`.
 
+On `SIGINT` (Ctrl+C) or `SIGTERM`, the gateway cancels queued work, requests
+abort from all sessions concurrently, and waits for current jobs and pending
+Telegram replies for up to **10 seconds total** before disposing sessions and
+exiting. Chats with unfinished prompts receive an interruption notice when delivery
+succeeds; resend unfinished requests after restarting. A forced process kill
+bypasses this graceful shutdown.
+
 ### Linux
 
 Run `npm run autostart:setup` as your normal user, without `sudo`. It writes

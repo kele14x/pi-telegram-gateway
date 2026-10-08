@@ -181,6 +181,20 @@ class ChatOperationCancelled extends Error {
 }
 
 const chats = new Map<number, ChatState>();
+let shuttingDown = false;
+let shutdownPromise: Promise<void> | null = null;
+const SHUTDOWN_TIMEOUT_MS = 10_000;
+const pendingDeliveries = new Set<Promise<void>>();
+
+/** Include background finalization and notices in graceful shutdown. */
+function trackDelivery(delivery: Promise<void>): Promise<void> {
+  pendingDeliveries.add(delivery);
+  void delivery.then(
+    () => pendingDeliveries.delete(delivery),
+    () => pendingDeliveries.delete(delivery),
+  );
+  return delivery;
+}
 
 function assertValidConfig() {
   const problems: string[] = [];
@@ -292,10 +306,10 @@ function wireSession(chatId: number, session: AgentSession, stream: TelegramStre
         const terminalError = errors.finishAttempt(event.willRetry);
         if (!event.willRetry) {
           if (terminalError) stream.append(`\n\n⚠️ ${terminalError}`);
-          void stream.finalize().catch(async (err) => {
+          void trackDelivery(stream.finalize().catch(async (err) => {
             log(`[chat ${chatId}] final response delivery failed: ${String((err as Error)?.message ?? err)}`);
             await safeSend(chatId, "⚠️ The final response could not be delivered after several retries.");
-          });
+          }));
         }
         else stream.setStatus("⏳ retrying…");
         break;
@@ -305,9 +319,9 @@ function wireSession(chatId: number, session: AgentSession, stream: TelegramStre
         // agent_end event. Finalize the status-only stream in that narrow case.
         if (!event.success && event.finalError === "Retry cancelled") {
           stream.setStatus("🛑 aborted");
-          void stream.finalize().catch((err) => {
+          void trackDelivery(stream.finalize().catch((err) => {
             log(`[chat ${chatId}] aborted response delivery failed: ${String((err as Error)?.message ?? err)}`);
-          });
+          }));
         }
         break;
       }
@@ -341,7 +355,7 @@ function ensureChat(chatId: number): ChatState {
 }
 
 function isCurrentChat(st: ChatState, generation: number): boolean {
-  return chats.get(st.chatId) === st && st.generation === generation;
+  return !shuttingDown && chats.get(st.chatId) === st && st.generation === generation;
 }
 
 function advanceChatGeneration(st: ChatState) {
@@ -600,13 +614,15 @@ function enqueueChatOp(
   });
 }
 
-async function safeSend(chatId: number, text: string) {
-  try {
-    const redacted = redactSecrets(text);
-    await bot.telegram.sendMessage(chatId, redacted.slice(0, chunkEnd(redacted, 4096)));
-  } catch (err) {
-    log(`[send] ${String((err as Error)?.message ?? err)}`);
-  }
+function safeSend(chatId: number, text: string): Promise<void> {
+  return trackDelivery((async () => {
+    try {
+      const redacted = redactSecrets(text);
+      await bot.telegram.sendMessage(chatId, redacted.slice(0, chunkEnd(redacted, 4096)));
+    } catch (err) {
+      log(`[send] ${String((err as Error)?.message ?? err)}`);
+    }
+  })());
 }
 
 // Retry a Telegram API call a few times with backoff: on flaky proxies a
@@ -650,6 +666,7 @@ const bot = new Telegraf(BOT_TOKEN, botOptions);
 
 /** Access guard: only explicitly allowlisted users may talk to the agent. */
 bot.use(async (ctx, next) => {
+  if (shuttingDown) return;
   const fromId = ctx.from?.id ?? -1;
   const chatId = ctx.chat?.id ?? -1;
   if (ALLOWED_USER_IDS.has(fromId)) return next();
@@ -1199,26 +1216,82 @@ async function main() {
   // resolves only after the bot is stopped. Retry transient proxy drops
   // instead of dying; give up only after retries (crash-restart takes over).
   try {
-    await withRetry(() => bot.launch({ dropPendingUpdates: DROP_PENDING_UPDATES }), 4, 1500);
+    await withRetry(() => shuttingDown ? Promise.resolve() : bot.launch({ dropPendingUpdates: DROP_PENDING_UPDATES }), 4, 1500);
   } catch (err) {
+    if (shuttingDown) return;
     log(`FATAL: bot launch failed after retries: ${String((err as Error)?.message ?? err)}`);
     process.exit(1);
   }
   log("bot stopped.");
 }
 
-async function shutdown() {
+function shutdown(): Promise<void> {
+  if (shutdownPromise) return shutdownPromise;
+  // Close ingress synchronously, including SDK preflight that is already
+  // awaiting resources. Repeated signals share the same cleanup and deadline.
+  shuttingDown = true;
+  shutdownPromise = performShutdown();
+  return shutdownPromise;
+}
+
+async function performShutdown() {
   log("shutting down…");
+  let timedOut = false;
+  let timeout!: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<void>((resolveDeadline) => {
+    timeout = setTimeout(() => {
+      timedOut = true;
+      resolveDeadline();
+    }, SHUTDOWN_TIMEOUT_MS);
+  });
   try {
     bot.stop("shutdown");
   } catch {
     /* ignore */
   }
-  for (const st of chats.values()) {
+  const states = [...chats.values()];
+  // Cancel every generation before any asynchronous cleanup can yield. SDK
+  // aborts run concurrently so one stalled session cannot delay the others.
+  for (const st of states) advanceChatGeneration(st);
+  const cleanup = Promise.all(states.map(async (st) => {
+    if (st.busy > 0 || st.session?.isStreaming) {
+      void safeSend(st.chatId, "🛑 Gateway shutting down. Active work is being stopped and queued prompts are cancelled. Please resend unfinished requests after restart.");
+    }
+    try {
+      st.session?.clearQueue();
+    } catch (err) {
+      log(`[shutdown] clear queue: ${String((err as Error)?.message ?? err)}`);
+    }
+    const abort = Promise.resolve().then(() => st.session?.abort()).catch((err) => {
+      log(`[shutdown] abort: ${String((err as Error)?.message ?? err)}`);
+    });
+    // Pending creation self-discards after its generation check. Replacement
+    // owns any detached old session; wait for it as well as the prompt chain.
+    await Promise.allSettled([abort, st.sessionInit, st.sessionReset, st.chain]);
+    if (st.stream) {
+      await trackDelivery(st.stream.finalize().catch((err) => {
+        log(`[shutdown] final response delivery failed: ${String((err as Error)?.message ?? err)}`);
+      }));
+    }
+  })).then(async () => {
+    // finalize() may already have started from agent_end and return early on
+    // another call. Wait for its original promise, including any failure notice.
+    while (pendingDeliveries.size > 0) {
+      await Promise.allSettled([...pendingDeliveries]);
+    }
+  });
+  try {
+    await Promise.race([cleanup, deadline]);
+  } finally {
+    clearTimeout(timeout);
+  }
+  if (timedOut) log(`[shutdown] cleanup timed out after ${SHUTDOWN_TIMEOUT_MS}ms; exiting with unfinished work or delivery`);
+  for (const st of states) {
+    st.stream?.cancel();
     try {
       st.session?.dispose();
-    } catch {
-      /* ignore */
+    } catch (err) {
+      log(`[shutdown] dispose: ${String((err as Error)?.message ?? err)}`);
     }
   }
   process.exit(0);
@@ -1228,6 +1301,7 @@ process.once("SIGINT", () => void shutdown());
 process.once("SIGTERM", () => void shutdown());
 
 main().catch((err) => {
+  if (shuttingDown) return;
   log(`FATAL: ${String((err as Error)?.message ?? err)}`);
   process.exit(1);
 });

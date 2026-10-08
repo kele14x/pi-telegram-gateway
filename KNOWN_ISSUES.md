@@ -1,6 +1,6 @@
 # Known issues
 
-Open issues: **19** — P0: **0**, P1: **4**, P2: **15**.
+Open issues: **18** — P0: **0**, P1: **3**, P2: **15**.
 
 Issue IDs are retained from earlier reviews and stay unchanged when resolved.
 
@@ -13,12 +13,6 @@ No open issues.
 ## P1 — Must fix
 
 Issues that lose user work, break core features, or disrupt normal operation.
-
-- **#4 — Shutdown truncates replies.** Sessions are disposed and the process exits
-  before pending stream delivery or agent work finishes.
-  **Where:** `index.ts` (`shutdown`).
-  **Fix:** Abort active sessions and finalize streams or send an interruption
-  notice under a bounded timeout before disposal and exit.
 
 - **#5 — Blocked-user replies are unthrottled.** Every unauthorized update receives
   "This bot is private", allowing group spam to trigger Telegram rate limits
@@ -131,6 +125,15 @@ Lower-impact behavior, diagnostic gaps, and documentation or test improvements.
   checkout paths with task-manager mocks.
 
 ## Resolved
+
+- **#4 — Shutdown truncated replies.** `SIGINT`/`SIGTERM` now stop accepting
+  work, invalidate queued jobs, clear SDK queues, abort sessions concurrently,
+  and drain current jobs and Telegram delivery under a shared 10 s deadline
+  before disposal and exit. Chats with unfinished prompts receive an interruption
+  notice. Repeated signals share one shutdown; forced kills still bypass cleanup.
+  Offline regressions cover concurrent aborts, queued/preflight/photo cancellation,
+  pending creation/replacement, final deltas, chunked and retry-finalization
+  delivery, fallback notices, stalled aborts/delivery, and redacted failures.
 
 - **#3 — `/cd` silently dropped queued prompts and could abort a newly started run.**
   Folder switches now refuse queued or active work and re-check generation and

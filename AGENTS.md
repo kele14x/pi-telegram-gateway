@@ -57,6 +57,11 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
   active run. `/new` does the same before disposing the session and deleting
   the history file. `/model`/`/thinking` are serialized behind the prompt
   chain via `enqueueChatOp`.
+- **Shutdown**: `SIGINT`/`SIGTERM` close ingress and invalidate all chat
+  generations, clear SDK queues, and abort sessions concurrently. Current jobs,
+  session creation/replacement, stream finalization, and notices share a 10 s
+  deadline before disposal and exit. Background finalization promises are tracked
+  even when a second `finalize()` call returns early. Forced kills bypass this.
 
 ## Key files
 
@@ -77,7 +82,7 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 | `remove-autostart.ps1` | idempotent task/launcher cleanup; reads the existing task XML so a task registered from an old repo path can be removed safely without deleting config/data/logs |
 | `start-gateway.ps1` / `stop.ps1` / `status.ps1` | manual start (detached), clean stop (kills leaked task tree), status overview |
 | `scripts/help.mjs` | `npm run help` cheat sheet |
-| `test/` | offline tests: `stream-test.mjs` (chunking/retry), `cd-test.mjs` (cwd override reopen), `chat-meta-test.mjs` (meta.json parse/write), `commands-scope.mjs` (per-scope command menus) |
+| `test/` | offline tests: `stream-test.mjs` (chunking/retry), `cd-test.mjs` (cwd override reopen), `chat-meta-test.mjs` (meta.json parse/write), `shutdown-test.mjs` (abort/delivery/deadline); `commands-scope.mjs` (per-scope command menus) |
 | `sessions/` | runtime data: per-chat `.jsonl` histories + `meta.json` (per-chat cwd/model/thinking) — **gitignored** |
 
 ## Non-negotiable rules

@@ -69,6 +69,7 @@ async function testCdCommand(ast, dirA, dirB, dirEmpty) {
       cancel() { effects.cancels++; }
     }
     const context = vm.createContext({
+      shuttingDown: false,
       AbortController, resolve, expandHome: path => path, chats: new Map(), chatMeta: metadata,
       DEFAULT_CWD: dirA, SESSIONS_DIR: dirA, log: () => {},
       bot: {command: (name, handler) => { if (name === "cd") cd = handler; }},
