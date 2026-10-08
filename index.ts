@@ -42,18 +42,16 @@ import { Telegraf } from "telegraf";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import {
   createAgentSession,
-  DefaultResourceLoader,
   getAgentDir,
   ModelRuntime,
   resolveCliModel,
   SessionManager,
-  SettingsManager,
   type AgentSession,
   type AgentSessionEvent,
   type PromptOptions,
 } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { createChatSettingsManager } from "./chat-settings.ts";
+import { createChatResources, syncChatCwdContext } from "./chat-resources.ts";
 import { parseChatMeta, writeChatMeta, type ChatMetaEntry } from "./chat-meta.ts";
 import { removeChatHistory } from "./history.ts";
 import { acquireInstanceLock, type InstanceLock } from "./instance-lock.ts";
@@ -233,18 +231,26 @@ async function createChatSession(chatId: number, cwd: string, sessionsDir = SESS
     }
   }
 
+  const resources = await createChatResources(
+    cwd, AGENT_DIR, APPEND_PROMPT ? [...CHAT_HINT, "", APPEND_PROMPT] : CHAT_HINT,
+  );
   const { session } = await createAgentSession({
     cwd,
     agentDir: AGENT_DIR,
     modelRuntime,
     // A chat may change its model/thinking level without rewriting the
     // owner's global pi settings or affecting another Telegram chat.
-    settingsManager: createChatSettingsManager(settingsManager),
-    resourceLoader: loader,
+    ...resources,
     sessionManager: sm,
     model,
     thinkingLevel,
   });
+  try {
+    await syncChatCwdContext(session, cwd);
+  } catch (err) {
+    session.dispose();
+    throw err;
+  }
   return session;
 }
 
@@ -1079,8 +1085,6 @@ function proxyOrigin(url: string): string {
 const isSelftest = process.argv.includes("--selftest");
 
 let modelRuntime!: ModelRuntime;
-let settingsManager!: SettingsManager;
-let loader!: DefaultResourceLoader;
 
 async function main() {
   if (!isSelftest && !acquireLock()) {
@@ -1094,14 +1098,6 @@ async function main() {
   if (!isSelftest) assertValidConfig();
 
   modelRuntime = await ModelRuntime.create();
-  settingsManager = SettingsManager.create(DEFAULT_CWD, AGENT_DIR);
-  loader = new DefaultResourceLoader({
-    cwd: DEFAULT_CWD,
-    agentDir: AGENT_DIR,
-    settingsManager,
-    appendSystemPrompt: APPEND_PROMPT ? [...CHAT_HINT, "", APPEND_PROMPT] : CHAT_HINT,
-  });
-  await loader.reload();
 
   // Refresh model catalogs in the background (best-effort).
   modelRuntime

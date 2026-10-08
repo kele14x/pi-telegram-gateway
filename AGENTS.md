@@ -33,6 +33,11 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
   via `SessionManager.open(file, dir, cwdOverride)` + `createAgentSession({cwd})`.
   A session file's header cwd may be older than the current chat cwd — that's
   intentional; always pass the chat cwd, never rely on the header.
+- **Per-chat project context:** session creation uses a fresh resource loader and
+  isolated settings for the chat cwd. On resume, a persisted context notice
+  identifies the current folder and scopes earlier instructions as historical.
+  The SDK replaces/removes active project instructions on the next prompt;
+  conversation history remains intact.
 - **Per-chat model/thinking** (`/model`, `/thinking`): also stored in
   `sessions/meta.json` and restored in `createChatSession` (meta → env
   `PI_TELEGRAM_MODEL`/`PI_TELEGRAM_THINKING` → pi default), so they survive
@@ -59,6 +64,7 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 | --- | --- |
 | `index.ts` | entrypoint: config (.env), telegraf wiring, user allowlist, commands, per-chat session hub, bootstrap (ModelRuntime / DefaultResourceLoader / SettingsManager) |
 | `chat-settings.ts` | creates an in-memory settings layer per Telegram chat so model/thinking changes never rewrite the owner's pi settings |
+| `chat-resources.ts` | loads resources/settings for the current chat cwd and records a context boundary when reopening retained history |
 | `chat-meta.ts` | parses/atomically writes `sessions/meta.json` (per-chat cwd + model/thinking) |
 | `history.ts` | deletes one per-chat SDK history file and deliberately propagates failure to `/new` |
 | `instance-lock.ts` | atomic, heartbeat-backed single-instance lock plus ownership metadata |

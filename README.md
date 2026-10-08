@@ -17,7 +17,8 @@
 - **Tool status inline** — watch the agent work: `🔧 read…` → `✅ read`
 - **Photos** — send a picture and the agent sees it (as an image input)
 - **Per-chat working folder** — `/cd <folder>` switches where the agent's
-  files/shell tools operate, persisted across restarts
+  tools operate and reloads that folder's project instructions and resources,
+  persisted across restarts
 - **Per-chat model & thinking** — `/model anthropic/claude-opus-4-5:high`,
   `/thinking medium`; choices are bound to the chat and survive `/cd`, `/new`,
   and gateway restarts
@@ -179,8 +180,14 @@ newest 20 archives are retained for each log type.
   model/thinking choices are stored there too, so they survive `/cd`, `/new`,
   and restarts (a stored model that no longer exists falls back to the startup
   default).
-- Project-level skills/prompts/`AGENTS.md` are still discovered from the launch
-  folder (per-chat `/cd` affects file/shell tools).
+- Project instructions (`AGENTS.md`, including applicable ancestors), settings,
+  skills, prompts, and extensions are loaded from the chat's current folder.
+  Each reopened session gets its own loader and isolated settings.
+- After a folder switch, the next request replaces the active project instructions
+  and includes a context notice identifying the current folder. Earlier messages
+  remain in history; earlier project instructions apply only where still relevant
+  to the current project. Switching to a folder with no applicable `AGENTS.md`
+  removes the old active instruction section.
 
 ## 🔐 Security
 

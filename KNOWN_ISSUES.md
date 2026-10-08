@@ -1,6 +1,6 @@
 # Known issues
 
-Open issues: **21** — P0: **0**, P1: **6**, P2: **15**.
+Open issues: **20** — P0: **0**, P1: **5**, P2: **15**.
 
 Issue IDs are retained from earlier reviews and stay unchanged when resolved.
 
@@ -13,13 +13,6 @@ No open issues.
 ## P1 — Must fix
 
 Issues that lose user work, break core features, or disrupt normal operation.
-
-- **#2 — `/cd` loads the wrong project's instructions.** Tools use the new folder,
-  but the shared resource loader and project settings still use the launch
-  folder. This loads the wrong `AGENTS.md`, project resources, and trust settings.
-  **Where:** `index.ts` (`main`, `createChatSession`), `chat-settings.ts`.
-  **Fix:** Create loaders and project settings for each chat cwd. Test that
-  switching folders loads the target project's instructions.
 
 - **#3 — `/cd` silently drops queued prompts and can abort a newly started run.**
   It checks streaming but not queued work, then invalidates queued jobs.
@@ -79,10 +72,9 @@ Lower-impact behavior, diagnostic gaps, and documentation or test improvements.
 
 - **#11 — Development documentation is out of date.** The test lists omit coverage
   and describe `commands-scope.mjs` as offline even though it reads `.env` and
-  calls Telegram. The consequences of `/cd` loading launch-folder context
-  also need clarification.
+  calls Telegram.
   **Where:** `AGENTS.md`, `README.md`, `scripts/help.mjs`.
-  **Fix:** Update test descriptions and cwd guidance after the runtime fix.
+  **Fix:** Update test descriptions to match the current validation commands.
 
 - **#12 — Lock/log location is fixed to the checkout.** Sessions have a configurable
   directory, while the gateway lock and logs remain under the repository.
@@ -146,6 +138,13 @@ Lower-impact behavior, diagnostic gaps, and documentation or test improvements.
   checkout paths with task-manager mocks.
 
 ## Resolved
+
+- **#2 — `/cd` loaded the wrong project's instructions.** Sessions now get fresh
+  resources and isolated project settings for the current folder. The SDK replaces
+  or removes active project instructions on the next request, and a persisted
+  context notice scopes earlier instructions. Conversation history is retained.
+  Offline tests cover folder switches, request context, settings isolation,
+  a folder without `AGENTS.md`, and returning to a folder with updated instructions.
 
 - **#23 — Startup errors exposed the bot token in logs.** Fixed in `419fb78`:
   fatal errors now pass through the redacting logger. Offline regressions cover
