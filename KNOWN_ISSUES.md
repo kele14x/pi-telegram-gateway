@@ -1,6 +1,6 @@
 # Known issues
 
-Open issues: **18** — P0: **0**, P1: **3**, P2: **15**.
+Open issues: **19** — P0: **0**, P1: **3**, P2: **16**.
 
 Issue IDs are retained from earlier reviews and stay unchanged when resolved.
 
@@ -123,6 +123,19 @@ Lower-impact behavior, diagnostic gaps, and documentation or test improvements.
   **Where:** `stop.ps1`, `start-gateway.ps1`.
   **Fix:** Verify task ownership before ending it. Test matching and foreign
   checkout paths with task-manager mocks.
+
+- **#27 — One shared code copy does not support independent Linux users.**
+  Linux services are registered per user, but managed startup loads the checkout's
+  `.env`, sessions default to the checkout, and logs/locks use fixed checkout paths.
+  Users running separate gateways from the same code directory can encounter
+  shared configuration/data, permission errors, or a second instance being blocked.
+  Multiple Telegram users on one gateway are supported, but their agents all run
+  as the same Linux account. Related to #12 and #19.
+  **Where:** `index.ts` (config and runtime paths), `package.json` (startup),
+  `scripts/linux-service.mjs`, `scripts/rotate-logs.mjs`.
+  **Fix:** Add per-user configuration, session, log, and lock locations for a
+  shared code installation; preserve duplicate-bot protection and document a
+  separate bot token and pi configuration for each independent Linux user.
 
 ## Resolved
 
