@@ -1,6 +1,6 @@
 # Known issues
 
-Open issues: **20** — P0: **0**, P1: **5**, P2: **15**.
+Open issues: **19** — P0: **0**, P1: **4**, P2: **15**.
 
 Issue IDs are retained from earlier reviews and stay unchanged when resolved.
 
@@ -13,13 +13,6 @@ No open issues.
 ## P1 — Must fix
 
 Issues that lose user work, break core features, or disrupt normal operation.
-
-- **#3 — `/cd` silently drops queued prompts and can abort a newly started run.**
-  It checks streaming but not queued work, then invalidates queued jobs.
-  A run can also start while directory validation is pending.
-  **Where:** `index.ts` (`/cd` handler).
-  **Fix:** Check busy state and re-check generation/activity after validation,
-  or serialize the switch. Report any intended cancellation and test both cases.
 
 - **#4 — Shutdown truncates replies.** Sessions are disposed and the process exits
   before pending stream delivery or agent work finishes.
@@ -138,6 +131,13 @@ Lower-impact behavior, diagnostic gaps, and documentation or test improvements.
   checkout paths with task-manager mocks.
 
 ## Resolved
+
+- **#3 — `/cd` silently dropped queued prompts and could abort a newly started run.**
+  Folder switches now refuse queued or active work and re-check generation and
+  chat activity after directory validation. Refusals and superseded switches
+  receive explicit feedback. Offline handler regressions cover queued prompts,
+  photo preparation, a run starting during validation, completed command activity,
+  generation changes, concurrent folder switches, and normal idle switching.
 
 - **#2 — `/cd` loaded the wrong project's instructions.** Sessions now get fresh
   resources and isolated project settings for the current folder. The SDK replaces

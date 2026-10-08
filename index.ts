@@ -861,10 +861,16 @@ bot.command("cd", async (ctx) => {
     await ctx.reply(`📁 Current: ${st.cwd}\n\nUsage: /cd <path> — absolute, relative to the current folder, or ~ based.`);
     return;
   }
-  if (st.session?.isStreaming) {
-    await ctx.reply("⏳ The agent is busy — /stop it first, then /cd.").catch(() => {});
+  // A prompt reserves busy synchronously, before photo/session preflight or
+  // streaming begins. Also leave command jobs and session resets undisturbed.
+  const isBusy = () => st.busy > 0 || st.running.size > 0 ||
+    !!st.sessionInit || !!st.sessionReset || !!st.session?.isStreaming;
+  if (isBusy()) {
+    await ctx.reply("⏳ This chat has queued or active work — wait for it to finish, or /stop it first, then /cd.").catch(() => {});
     return;
   }
+  const generation = st.generation;
+  const chain = st.chain;
   const target = resolve(st.cwd, expandHome(raw));
   try {
     if (!(await stat(target)).isDirectory()) throw new Error("not a directory");
@@ -872,10 +878,20 @@ bot.command("cd", async (ctx) => {
     await ctx.reply(`⚠️ No such directory: ${target}`).catch(() => {});
     return;
   }
+  // Directory validation yields to other updates. An older /cd must not
+  // override /new, /stop, another /cd, or cancel work accepted meanwhile.
+  if (!isCurrentChat(st, generation)) {
+    await ctx.reply("⚠️ Folder change cancelled because this chat changed while checking the path. Please retry /cd.").catch(() => {});
+    return;
+  }
+  if (isBusy() || st.chain !== chain) {
+    await ctx.reply("⏳ Chat activity changed while checking the folder — wait for work to finish, or /stop it, then retry /cd.").catch(() => {});
+    return;
+  }
   st.cwd = target;
   const persisted = saveChatMeta(ctx.chat.id, { cwd: target });
-  // Invalidate queued submissions and any in-flight session creation, so
-  // nothing from the old folder runs after the switch.
+  // Invalidate other directory validations before replacing the idle session.
+  // New jobs use this generation and wait for sessionReset before reopening.
   advanceChatGeneration(st);
   st.session?.clearQueue();
   void replaceChatSession(st, false);

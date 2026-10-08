@@ -176,6 +176,8 @@ newest 20 archives are retained for each log type.
   (the same format pi uses), loaded lazily on first message and resumed on restart.
 - `/cd` keeps the same history file and re-opens it with the new folder as the
   agent's working directory — your conversation continues where you left off.
+  It refuses to switch while work is queued or active. Wait for completion, or
+  use `/stop` to explicitly cancel prompts before retrying `/cd`.
 - Per-chat folders persist across restarts in `sessions/meta.json`; per-chat
   model/thinking choices are stored there too, so they survive `/cd`, `/new`,
   and restarts (a stored model that no longer exists falls back to the startup
