@@ -6,9 +6,18 @@ core (`index.ts`, `telegram-stream.ts`, `chat-*.ts`, `history.ts`,
 ops scripts (`setup-autostart.ps1`, `remove-autostart.ps1`,
 `start-gateway.ps1`, `stop.ps1`, `status.ps1`).
 
-Baseline at review time: `npm run typecheck` and `npm test` both pass, and a
+Initial review baseline: `npm run typecheck` and `npm test` both pass, and a
 scan of the working tree and every commit in history found no bot-token-shaped
 strings.
+
+Follow-up review on 2026-10-08 checked `af49d54` after pulling the Linux service
+management and dependency upgrades. Typechecking and all offline tests passed
+on macOS with the locked dependencies. The earlier gateway findings remain
+open; finding 23 demonstrates that clean source/history scans do not rule out
+runtime secret exposure. The Windows service-test portability issue was fixed
+locally in `aa8f877` (see resolved finding 26). Windows paths and filename rules
+were simulated for that fix; native Windows and systemd execution remain
+unverified.
 
 Numbering is retained from the review conversations. The tables below list only
 open findings.
@@ -37,10 +46,13 @@ and deliberately does not always agree with priority — see
 | [17](#17--low--userid-is-interpolated-unescaped-into-the-task-xml) | **P2** | Low | Ops | `<UserId>` is interpolated unescaped into the task XML |
 | [18](#18--low--log-retention-sort-uses-locale-collation) | **P2** | Low | Ops | Log-retention sort uses locale collation |
 | [19](#19--low--the-single-instance-lock-is-per-repo-not-per-bot) | **P2** | Low | Locking | The single-instance lock is per-repo, not per-bot |
-| [21](#21--low--command-error-replies-lose-the-forum-topic) | **P2** | Low | Delivery | `/model` and `/thinking` error replies lose the forum topic |
+| [21](#21--low--agent-replies-and-error-notices-lose-the-forum-topic) | **P2** | Low | Delivery | Streamed replies, queue acknowledgments, and command errors lose the forum topic |
 | [22](#22--low--command-error-redaction-tests-only-check-an-identifier-name) | **P2** | Low | Tests | Command-error redaction tests only check an identifier name |
+| [23](#23--high--startup-failures-can-log-the-bot-token) | **P0** | High | Security | Startup failures bypass redaction and can log the bot token |
+| [24](#24--medium--tool-status-updates-bypass-the-edit-throttle) | **P2** | Medium | Streaming | Tool status updates bypass the 800 ms edit interval |
+| [25](#25--medium--stopps1-can-end-another-checkouts-scheduled-task) | **P2** | Medium | Ops | `stop.ps1` ends the globally named task before verifying repository ownership |
 
-**Open tally (19 findings):** 0 × P0 · 6 × P1 · 13 × P2.
+**Open tally (22 findings):** 1 × P0 · 6 × P1 · 15 × P2.
 
 ---
 
@@ -58,7 +70,9 @@ Criteria used:
 
 ### P0 — fix before pushing
 
-No open P0 findings.
+| # | Finding | Why P0 |
+| --- | --- | --- |
+| [23](#23--high--startup-failures-can-log-the-bot-token) | Startup errors expose the bot token in logs | A reproduced secret exposure meets this register's P0 criterion. Normal log redaction does not cover the fatal handler. |
 
 ### P1 — must be solved
 
@@ -86,8 +100,10 @@ No open P0 findings.
 | [17](#17--low--userid-is-interpolated-unescaped-into-the-task-xml) | Unescaped `<UserId>` | Needs `&`, `<`, or `>` in a Windows logon name — practically impossible. |
 | [18](#18--low--log-retention-sort-uses-locale-collation) | Locale-dependent retention sort | Retention count is already correct; theoretical mis-ordering only. |
 | [19](#19--low--the-single-instance-lock-is-per-repo-not-per-bot) | Lock is per-repo, not per-bot | Requires two checkouts pointed at one token — outside the documented single-machine deployment. Silent message loss if it happens, so worth documenting even if not fixed. |
-| [21](#21--low--command-error-replies-lose-the-forum-topic) | Command errors lose their topic | Diagnostic replies move out of the originating forum topic; the token-leak fix remains effective. |
+| [21](#21--low--agent-replies-and-error-notices-lose-the-forum-topic) | Agent replies and notices lose their topic | Affects forum-topic routing; ordinary-chat delivery and command-error redaction still work. |
 | [22](#22--low--command-error-redaction-tests-only-check-an-identifier-name) | Fragile redaction regression guard | A coverage gap, not a demonstrated token leak in the current handlers. |
+| [24](#24--medium--tool-status-updates-bypass-the-edit-throttle) | Status edits arrive too quickly | Can provoke Telegram rate limits, but retries remain bounded; no demonstrated permanent output loss. |
+| [25](#25--medium--stopps1-can-end-another-checkouts-scheduled-task) | Stop bypasses task ownership checks | Requires multiple checkouts; ends the registered task even when its action belongs to another repository path. |
 
 ### Where severity and priority diverge
 
@@ -111,18 +127,47 @@ These three are judgment calls and are the ones most worth arguing with:
 
 ### Suggested order of work
 
-1. **Finding 14** (P1, one `if`) — cheapest P1, and it un-masks finding 17.
-2. **Finding 13** (P1) — then re-check finding 15.
-3. **Finding 2** (P1, largest change) — per-cwd loader/settings cache, plus a
+1. **Finding 23** (P0) — redact fatal startup errors and add an offline
+   regression before the next push.
+2. **Finding 14** (P1, one `if`) — cheapest P1, and it un-masks finding 17.
+3. **Finding 13** (P1) — then re-check finding 15 and include finding 25's task
+   ownership checks when changing the stop path.
+4. **Finding 2** (P1, largest change) — per-cwd loader/settings cache, plus a
    `test/cd-test.mjs` assertion so it cannot regress.
-4. **Findings 3 and 4** (P1) — both are small, localised changes in `index.ts`.
-5. **Findings 21 and 22** (P2) — preserve command-error topic routing and cover
-   both handlers with behavioural tests.
-6. **Finding 11** last, so the docs describe the post-fix behaviour.
+5. **Findings 3 and 4** (P1) — cover directory-validation races and shutdown
+   delivery in addition to queued-message cancellation.
+6. **Findings 21, 22, and 24** (P2) — preserve topic routing for prompts and
+   notices, test command errors behaviourally, and throttle status updates.
+7. **Finding 11** last, so the docs describe the post-fix behaviour.
 
 ---
 
 ## High
+
+### 23 · High — Startup failures can log the bot token
+
+**Where:** `index.ts:1161` (`getMe()`), `index.ts:1218-1220` (fatal handler).
+
+If the startup `getMe()` request exhausts its retries, the error propagates to
+`main().catch(...)`. That handler uses `console.error("FATAL:", err)` directly,
+bypassing `log()` and `redactSecrets()`. Telegram transport and response-parsing
+errors can include the request URL, whose path contains the bot token. Managed
+launches write this raw error into their stderr or combined gateway log.
+
+**Evidence.** An offline `node-fetch` response-parsing failure for a synthetic
+`getMe` URL produced an error containing a synthetic token. Executing the real
+fatal handler with that error retained the token in captured console output.
+The reproduction still succeeded after the dependency upgrade in `af49d54`.
+No real credentials or Telegram requests were used.
+
+**Suggested fix.** Send a formatted fatal error message through `log()` or
+explicitly redact it before writing to stderr. Add an offline startup-failure
+regression that captures console output and asserts that synthetic bot tokens
+and proxy credentials are absent, including after retry exhaustion.
+
+**Status:** open (P0 under this register's secret-exposure criterion).
+
+---
 
 ### 2 · High — `/cd` moves the tools but leaves the system prompt describing the launch folder
 
@@ -178,19 +223,33 @@ in the session after a cwd change.
 
 ### 3 · Medium — `/cd` silently discards queued messages
 
-**Where:** `index.ts:848-878`.
+**Where:** `index.ts:851-880`.
 
-`/cd` refuses only when `st.session?.isStreaming` (`index.ts:855`); it never
-checks `st.busy`. It then calls `advanceChatGeneration(st)` (`index.ts:870`),
+`/cd` refuses only when `st.session?.isStreaming` (`index.ts:858`); it never
+checks `st.busy`. It then calls `advanceChatGeneration(st)` (`index.ts:873`),
 which invalidates every queued `submitPrompt` job — each logs
 "dropped queued message after cancellation" (`index.ts:517`) and returns. The
-reply (`index.ts:874-877`) says only *"Conversation history is kept — your next
+reply (`index.ts:877-879`) says only *"Conversation history is kept — your next
 message continues in this folder"*, with no mention that N queued messages were
 just thrown away. `/stop` is explicit about this ("dropped queued messages");
 `/cd` is not.
 
-**Suggested fix.** Either refuse when `st.busy > 0` (mirroring the streaming
-check), or report the dropped count in the reply.
+There is also a race across `await stat(target)` (`index.ts:864`): a prompt can
+start after the streaming check but before directory validation completes.
+The handler does not re-check activity before changing the generation and
+replacing the session, so it can abort that newly active run while reporting a
+successful folder switch.
+
+**Evidence.** Offline execution with two reserved prompts delivered neither
+prompt after `/cd`, and the success reply did not mention dropped work. A
+separate fixture started a mock run while directory validation was pending;
+completing validation caused its session to be aborted and the cwd to change.
+
+**Suggested fix.** Refuse when `st.busy > 0` as well as when streaming, and
+re-check the captured generation and activity after directory validation before
+committing the switch. Alternatively serialize the switch with prompt work and
+explicitly report any intended cancellation. Cover both queued prompts and the
+directory-validation race with offline behavioural tests.
 
 **Status:** open.
 
@@ -248,6 +307,58 @@ backing off.
 **Suggested fix.** Either implement exponential backoff or correct the comment.
 
 **Status:** open.
+
+---
+
+### 24 · Medium — Tool status updates bypass the edit throttle
+
+**Where:** `telegram-stream.ts:155-161` (`setStatus()`),
+`telegram-stream.ts:202-212` (`scheduleEdit()`), `index.ts:278-284` (tool events).
+
+`setStatus()` calls `scheduleEdit(true)`, whose `forceSoon` branch always waits
+120 ms without considering `lastEditAt`. Tool start/end events spaced far
+enough apart for each timer to fire can therefore issue successive API edits
+well inside the documented 800 ms interval. Status events can also schedule
+redundant edits when the open segment already has answer text.
+
+**Evidence.** An offline mock receiving three different statuses 150 ms apart
+recorded three delivery calls with 151 ms between consecutive calls. This was
+reproduced again on `af49d54`. The existing stream tests cover bounded retries
+but do not assert the interval for repeated status updates.
+
+**Suggested fix.** Apply the minimum edit interval to status updates after the
+first delivery, coalesce intervening status changes, and avoid editing an
+unchanged answer solely because a tool status changed. Add a scenario to
+`test/stream-test.mjs` that exercises repeated tool statuses and checks the
+delivery cadence while preserving the existing bounded retry behaviour.
+
+**Status:** open (P2).
+
+---
+
+### 25 · Medium — `stop.ps1` can end another checkout's scheduled task
+
+**Where:** `stop.ps1:14`, `stop.ps1:16-43`, `start-gateway.ps1:14`.
+
+The script calls `schtasks /End /TN "pi-telegram-gateway"` before checking the
+registered task's action path. Task names are shared across repository copies.
+If checkout A owns the registered task, invoking `stop.ps1` from checkout B
+still ends A's task, despite the script's promise to stop only the instance
+owned by the current repository. The later entry-path and lock-metadata checks
+protect the explicit process-tree kills, not the preceding task stop. Manual
+startup from B inherits this side effect because it calls `stop.ps1` first.
+
+**Evidence.** Source inspection confirms the unconditional task stop precedes
+all repository ownership checks. This has not been executed on native Windows;
+no running gateway or scheduled task was stopped during review.
+
+**Suggested fix.** Read the registered task XML and verify its launcher or entry
+path belongs to this checkout before issuing `/End`. Fail clearly on an
+ownership mismatch, preserving the existing checks for directly launched
+processes. Add offline task-manager mocks for matching and foreign checkout
+paths and assert that the foreign task is never ended.
+
+**Status:** open (P2; separate from finding 13's task-disable behaviour).
 
 ---
 
@@ -503,24 +614,36 @@ bot-scoped (e.g. a hash of the bot token) under a shared location.
 
 ---
 
-### 21 · Low — Command error replies lose the forum topic
+### 21 · Low — Agent replies and error notices lose the forum topic
 
-**Where:** `index.ts:765`, `index.ts:806`, and `safeSend()` at `index.ts:597-600`.
+**Where:** `index.ts:393` (stream creation), `index.ts:937` (text submission),
+`telegram-stream.ts:225` (streamed sends), and `safeSend()` at
+`index.ts:597-600` (notices and command errors).
 
 Commit `aeaa467` routes `/model` and `/thinking` caught errors through `safeSend()`.
 This fixes token exposure, but unlike `ctx.reply()`, that helper does not forward
 `message_thread_id`. Error notices therefore no longer target the command's
-originating forum topic. The earlier description accepted this as a tradeoff;
-it is an avoidable delivery regression, not a requirement of redaction.
+originating forum topic.
+
+The follow-up review found that this also affects ordinary agent output: text
+and photo handlers submit prompts using only the chat ID, and `TelegramStream`
+sends messages without the originating topic ID. Queue acknowledgments and
+other notices delivered by `safeSend()` have the same omission. A prompt in a
+forum topic can therefore receive its answer or notice outside that topic.
 
 **Evidence.** Offline before/after execution of both handlers with Telegraf's
 real `Context` and mocked delivery preserved synthetic thread id `77` before the
 change and omitted it afterwards. Both session-creation and reply-failure paths
 were checked; the current handlers successfully redacted the synthetic token.
+Additional offline execution of a text prompt from synthetic topic `77`
+produced a streamed `sendMessage()` call with no topic option.
 
-**Suggested fix.** Preserve the originating topic ID when sending command errors,
-without bypassing `safeSend()`'s redaction and Unicode-safe truncation. Cover
-forum-topic and ordinary-chat delivery in the tests described in finding 22.
+**Suggested fix.** Capture the originating topic in each queued prompt or
+command operation and carry it into streamed sends and notices. Keep delivery
+routing bound to the originating run so later prompts in another topic cannot
+redirect an earlier run's pending output. Preserve `safeSend()`'s redaction and
+Unicode-safe truncation. Cover topic and ordinary-chat delivery, including
+queued prompts from different topics and the command failures in finding 22.
 
 **Status:** open (P2).
 
@@ -542,3 +665,29 @@ redacted delivery to the correct chat and originating forum topic. Keep the AST
 guard as supplemental protection rather than the sole command-error test.
 
 **Status:** open (P2).
+
+---
+
+## Resolved follow-up findings
+
+### 26 · Low — Service-test filesystem fixtures were invalid on Windows
+
+**Where:** `test/service-test.mjs:29-36`, `test/service-test.mjs:119-124`.
+
+The Linux lifecycle test originally created a directory containing double
+quotes, which Windows forbids. Because `package.json` includes this test in
+every `npm test`, the fixture prevented the full offline suite from completing
+on Windows. Its repository-migration assertion also compared a raw Windows
+entry path with the backslash-escaped command argument in the generated unit.
+
+**Fix.** Commit `aa8f877` uses a Windows-safe directory name for real filesystem
+fixtures, keeps quote/backslash coverage in a separate string-only unit
+generation check, and compares the migrated entry path using its escaped unit
+representation. No gateway or service-manager runtime behaviour changed.
+
+**Validation.** Typechecking and the full offline suite passed on macOS. The
+service test also passed with simulated Windows paths and filename restrictions
+using an in-memory filesystem and fake service manager. Native Windows
+execution remains unverified.
+
+**Status:** resolved in `aa8f877`; excluded from the open tally.
