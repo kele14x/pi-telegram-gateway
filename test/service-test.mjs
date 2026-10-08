@@ -26,9 +26,14 @@ assert.throws(() => serviceCommand("status", "darwin"), /unsupported.*npm start/
 assert.throws(() => serviceCommand("delete-everything"), /Usage/);
 assert.throws(() => buildLinuxUnit("/repo\nExecStart=bad", process.execPath, "/bin"), /control characters/);
 
+// Exercise quote/backslash escaping as strings; these names cannot be created
+// on Windows, so keep them out of the filesystem lifecycle fixtures below.
+const escapingUnit = buildLinuxUnit('/synthetic/repo 中文 $cash %name "quote" \\path', process.execPath, '/custom/bin:$PATH:/quoted " bin');
+assert(escapingUnit.includes('\\"quote\\"') && escapingUnit.includes('\\\\path'));
+
 const temporary = mkdtempSync(join(tmpdir(), "pi-gateway-service-"));
 try {
-  const root = join(temporary, 'repo 中文 $cash %name "quote" \\path');
+  const root = join(temporary, "repo 中文 $cash %name");
   const home = join(temporary, "home");
   const config = join(temporary, "custom config");
   const unitPath = join(config, "systemd", "user", UNIT_NAME);
@@ -79,7 +84,6 @@ try {
   assert(unit.includes("%" + "%name"), "systemd specifiers must be escaped");
   assert(unit.includes('$cash'), "literal dollar signs must survive command generation");
   assert(unit.includes('ExecStart=:"'), "systemd variable substitution must be disabled");
-  assert(unit.includes('\\"quote\\"') && unit.includes('\\\\path'));
   assert(!unit.includes("SYNTHETIC_CONFIG"), "unit must not embed .env contents");
   if (process.platform !== "win32") assert.equal(statSync(unitPath).mode & 0o777, 0o600);
   reset();
@@ -115,7 +119,9 @@ try {
   // Refresh/removal must stop the unit previously registered at an old root.
   const movedRoot = join(temporary, "moved repo");
   manageLinuxService("autostart:setup", { ...options, root: movedRoot });
-  assert(readFileSync(unitPath, "utf8").includes(join(movedRoot, "index.ts")));
+  // Quoted command arguments escape Windows path separators in the unit text.
+  const movedEntry = join(movedRoot, "index.ts").replaceAll("\\", "\\\\");
+  assert(readFileSync(unitPath, "utf8").includes(movedEntry));
   assert.deepEqual(changes(), ["stop", "disable", "daemon-reload", "enable"]);
   reset();
   perform("autostart:remove");
