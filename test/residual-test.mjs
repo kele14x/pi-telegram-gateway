@@ -1,9 +1,10 @@
-// Offline regressions for terminal errors, history removal, and outbound redaction.
+// Offline regressions for terminal errors, history removal, and error redaction.
 
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
+import { format } from "node:util";
 import vm from "node:vm";
 import ts from "typescript";
 import { removeChatHistory } from "../history.ts";
@@ -52,10 +53,21 @@ function assert(condition, message) {
 // Extract the real handlers without running bootstrap or loading owner credentials.
 const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
 const ast = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-const names = new Set(["submitPrompt", "enqueueChatJob", "safeSend", "redactSecrets", "proxyOrigin", "log"]);
+const names = new Set(["submitPrompt", "enqueueChatJob", "safeSend", "redactSecrets", "proxyOrigin", "log", "withRetry"]);
 const handlers = ast.statements.filter(node => ts.isFunctionDeclaration(node) && names.has(node.name?.text));
 assert(handlers.length === names.size, "gateway regression handlers could not be found");
 const code = ts.transpileModule(handlers.map(node => node.getText(ast)).join("\n"), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
+}).outputText;
+const fatalHandler = ast.statements.find(node =>
+  ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) &&
+  ts.isPropertyAccessExpression(node.expression.expression) &&
+  node.expression.expression.name.text === "catch" &&
+  ts.isCallExpression(node.expression.expression.expression) &&
+  node.expression.expression.expression.expression.getText(ast) === "main",
+);
+assert(fatalHandler, "gateway fatal startup handler could not be found");
+const fatalCode = ts.transpileModule(fatalHandler.getText(ast), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
 const token = "123456789:synthetic-offline-token";
@@ -71,7 +83,10 @@ function makeGateway() {
   const bot = { telegram: { sendMessage: async (chatId, text) => sent.push({ chatId, text }) } };
   const context = vm.createContext({
     Error, BOT_TOKEN: token, PROXY_URL: proxy, URL, bot, chunkEnd: stream.chunkEnd,
-    console: { log: (...args) => logs.push(args.join(" ")) },
+    console: {
+      log: (...args) => logs.push(format(...args)),
+      error: (...args) => logs.push(format(...args)),
+    },
     isCurrentChat: (st, generation) => st === state && generation === state.generation,
     abortable: promise => promise,
     ChatOperationCancelled: class extends Error {},
@@ -84,6 +99,46 @@ function makeGateway() {
 const require = createRequire(import.meta.url);
 const telegrafRequire = createRequire(require.resolve("telegraf"));
 const { Response } = telegrafRequire("node-fetch");
+
+// Run the actual retry helper and fatal catch with a mocked startup request.
+// No bootstrap, owner configuration, process exit, or network call is performed.
+{
+  const response = new Response("<html>invalid API response</html>", {
+    url: `https://api.telegram.org/bot${token}/getMe`, status: 200,
+  });
+  const parsingError = await response.json().catch(error => error);
+  assert(parsingError instanceof Error && parsingError.message.includes(token),
+    "startup parsing-error fixture must contain the synthetic token");
+  const transportMessage = `request to https://api.telegram.org/bot${token}/getMe failed via ${proxy}`;
+  for (const [scenario, error, hasProxy] of [
+    ["invalid-json", parsingError, false],
+    ["transport-error", new Error(transportMessage), true],
+    ["string-rejection", transportMessage, true],
+    ["object-rejection", { message: transportMessage, request: { token, proxy } }, true],
+  ]) {
+    const { context, bot, logs } = makeGateway();
+    const exits = [];
+    const delays = [];
+    let attempts = 0;
+    bot.telegram.getMe = async () => { attempts++; throw error; };
+    context.setTimeout = (callback, delay) => { delays.push(delay); callback(); };
+    context.process = { exit: code => exits.push(code) };
+    context.main = () => context.withRetry(() => bot.telegram.getMe());
+    await vm.runInContext(fatalCode, context);
+    assert(attempts === 4 && delays.length === 3, `${scenario}: startup did not exhaust retries`);
+    assert(exits.length === 1 && exits[0] === 1, `${scenario}: fatal startup did not exit with code 1`);
+    const fatal = logs.filter(line => line.includes("FATAL:"));
+    assert(logs.length === 4 && fatal.length === 1, `${scenario}: retry or fatal diagnostics were lost`);
+    assert(!logs.some(line => line.includes(token)), `${scenario}: startup exposed the token in logs`);
+    assert(fatal[0].includes("<token>"), `${scenario}: fatal token placeholder is missing`);
+    if (hasProxy) {
+      assert(!logs.some(line => line.includes(proxy) || line.includes("synthetic-password") || line.includes("synthetic-user")),
+        `${scenario}: startup exposed proxy credentials in logs`);
+      assert(fatal[0].includes("https://proxy.example:8443"), `${scenario}: proxy origin diagnostic was lost`);
+    }
+  }
+}
+
 for (const scenario of ["invalid-json", "body-stream"]) {
   const body = scenario === "invalid-json" ? "<html>invalid API response</html>" : new PassThrough();
   const response = new Response(body, { url: `https://api.telegram.org/bot${token}/getFile`, status: 200 });
@@ -168,4 +223,4 @@ for (const scenario of ["invalid-json", "body-stream"]) {
   );
 }
 
-console.log("Deferred-error, history-removal, outbound-redaction, and reply-redaction regressions passed");
+console.log("Deferred-error, history-removal, startup-redaction, outbound-redaction, and reply-redaction regressions passed");

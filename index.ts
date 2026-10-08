@@ -1216,6 +1216,6 @@ process.once("SIGINT", () => void shutdown());
 process.once("SIGTERM", () => void shutdown());
 
 main().catch((err) => {
-  console.error("FATAL:", err);
+  log(`FATAL: ${String((err as Error)?.message ?? err)}`);
   process.exit(1);
 });

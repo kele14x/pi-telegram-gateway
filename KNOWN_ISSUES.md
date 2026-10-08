@@ -12,9 +12,10 @@ strings.
 
 Follow-up review on 2026-10-08 checked `af49d54` after pulling the Linux service
 management and dependency upgrades. Typechecking and all offline tests passed
-on macOS with the locked dependencies. The earlier gateway findings remain
-open; finding 23 demonstrates that clean source/history scans do not rule out
-runtime secret exposure. The Windows service-test portability issue was fixed
+on macOS with the locked dependencies. Finding 23 demonstrates that clean
+source/history scans do not rule out runtime secret exposure; its fatal logging
+path is now fixed with an offline regression. The other gateway findings remain
+open. The Windows service-test portability issue was fixed
 locally in `aa8f877` (see resolved finding 26). Windows paths and filename rules
 were simulated for that fix; native Windows and systemd execution remain
 unverified.
@@ -48,11 +49,10 @@ and deliberately does not always agree with priority — see
 | [19](#19--low--the-single-instance-lock-is-per-repo-not-per-bot) | **P2** | Low | Locking | The single-instance lock is per-repo, not per-bot |
 | [21](#21--low--agent-replies-and-error-notices-lose-the-forum-topic) | **P2** | Low | Delivery | Streamed replies, queue acknowledgments, and command errors lose the forum topic |
 | [22](#22--low--command-error-redaction-tests-only-check-an-identifier-name) | **P2** | Low | Tests | Command-error redaction tests only check an identifier name |
-| [23](#23--high--startup-failures-can-log-the-bot-token) | **P0** | High | Security | Startup failures bypass redaction and can log the bot token |
 | [24](#24--medium--tool-status-updates-bypass-the-edit-throttle) | **P2** | Medium | Streaming | Tool status updates bypass the 800 ms edit interval |
 | [25](#25--medium--stopps1-can-end-another-checkouts-scheduled-task) | **P2** | Medium | Ops | `stop.ps1` ends the globally named task before verifying repository ownership |
 
-**Open tally (22 findings):** 1 × P0 · 6 × P1 · 15 × P2.
+**Open tally (21 findings):** 0 × P0 · 6 × P1 · 15 × P2.
 
 ---
 
@@ -70,9 +70,8 @@ Criteria used:
 
 ### P0 — fix before pushing
 
-| # | Finding | Why P0 |
-| --- | --- | --- |
-| [23](#23--high--startup-failures-can-log-the-bot-token) | Startup errors expose the bot token in logs | A reproduced secret exposure meets this register's P0 criterion. Normal log redaction does not cover the fatal handler. |
+No open P0 findings. [Finding 23](#23--high--startup-failures-can-log-the-bot-token)
+is resolved with fatal startup redaction and offline regression coverage.
 
 ### P1 — must be solved
 
@@ -127,47 +126,20 @@ These three are judgment calls and are the ones most worth arguing with:
 
 ### Suggested order of work
 
-1. **Finding 23** (P0) — redact fatal startup errors and add an offline
-   regression before the next push.
-2. **Finding 14** (P1, one `if`) — cheapest P1, and it un-masks finding 17.
-3. **Finding 13** (P1) — then re-check finding 15 and include finding 25's task
+1. **Finding 14** (P1, one `if`) — cheapest P1, and it un-masks finding 17.
+2. **Finding 13** (P1) — then re-check finding 15 and include finding 25's task
    ownership checks when changing the stop path.
-4. **Finding 2** (P1, largest change) — per-cwd loader/settings cache, plus a
+3. **Finding 2** (P1, largest change) — per-cwd loader/settings cache, plus a
    `test/cd-test.mjs` assertion so it cannot regress.
-5. **Findings 3 and 4** (P1) — cover directory-validation races and shutdown
+4. **Findings 3 and 4** (P1) — cover directory-validation races and shutdown
    delivery in addition to queued-message cancellation.
-6. **Findings 21, 22, and 24** (P2) — preserve topic routing for prompts and
+5. **Findings 21, 22, and 24** (P2) — preserve topic routing for prompts and
    notices, test command errors behaviourally, and throttle status updates.
-7. **Finding 11** last, so the docs describe the post-fix behaviour.
+6. **Finding 11** last, so the docs describe the post-fix behaviour.
 
 ---
 
 ## High
-
-### 23 · High — Startup failures can log the bot token
-
-**Where:** `index.ts:1161` (`getMe()`), `index.ts:1218-1220` (fatal handler).
-
-If the startup `getMe()` request exhausts its retries, the error propagates to
-`main().catch(...)`. That handler uses `console.error("FATAL:", err)` directly,
-bypassing `log()` and `redactSecrets()`. Telegram transport and response-parsing
-errors can include the request URL, whose path contains the bot token. Managed
-launches write this raw error into their stderr or combined gateway log.
-
-**Evidence.** An offline `node-fetch` response-parsing failure for a synthetic
-`getMe` URL produced an error containing a synthetic token. Executing the real
-fatal handler with that error retained the token in captured console output.
-The reproduction still succeeded after the dependency upgrade in `af49d54`.
-No real credentials or Telegram requests were used.
-
-**Suggested fix.** Send a formatted fatal error message through `log()` or
-explicitly redact it before writing to stderr. Add an offline startup-failure
-regression that captures console output and asserts that synthetic bot tokens
-and proxy credentials are absent, including after retry exhaustion.
-
-**Status:** open (P0 under this register's secret-exposure criterion).
-
----
 
 ### 2 · High — `/cd` moves the tools but leaves the system prompt describing the launch folder
 
@@ -651,7 +623,7 @@ queued prompts from different topics and the command failures in finding 22.
 
 ### 22 · Low — Command error redaction tests only check an identifier name
 
-**Where:** `test/residual-test.mjs:138-168`.
+**Where:** `test/residual-test.mjs:193-224`.
 
 The AST guard rejects `ctx.reply(...)` arguments referencing an identifier
 literally named `err`; it does not execute `/model` or `/thinking`. Renaming or
@@ -669,6 +641,35 @@ guard as supplemental protection rather than the sole command-error test.
 ---
 
 ## Resolved follow-up findings
+
+### 23 · High — Startup failures can log the bot token
+
+**Where:** `index.ts:1161` (`getMe()`), `index.ts:1218-1220` (fatal handler).
+
+The startup `getMe()` error propagates to `main().catch(...)` after retry
+exhaustion. The former handler used `console.error("FATAL:", err)` directly,
+bypassing redaction. Telegram transport and response-parsing errors can include
+the token-bearing request URL, exposing the token in managed startup logs.
+
+**Evidence.** An offline `node-fetch` response-parsing failure for a synthetic
+`getMe` URL produced an error containing a synthetic token. The new regression
+failed against the former handler because captured console output retained that
+token. No real credentials or Telegram requests were used.
+
+**Fix.** The fatal handler formats the error as text and passes it through
+`log()`, which redacts the bot token and reduces the configured proxy URL to
+its origin. It retains the fatal diagnostic and exit code 1.
+
+**Validation.** `test/residual-test.mjs` executes the real retry helper and
+fatal catch in a VM with mocked startup, timers, and process exit. Cases cover
+a real offline response-parsing error, transport errors with synthetic proxy
+credentials, and string/object rejections. They verify all four attempts,
+redacted retry and fatal logs, useful diagnostics, and exit code 1. Typechecking
+and the full offline suite pass.
+
+**Status:** resolved; excluded from the open tally (formerly P0).
+
+---
 
 ### 26 · Low — Service-test filesystem fixtures were invalid on Windows
 
