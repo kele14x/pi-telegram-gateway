@@ -59,7 +59,7 @@ import { SessionErrorBuffer } from "./session-errors.ts";
 import { TelegramStream, chunkEnd } from "./telegram-stream.ts";
 
 // ── Single-instance lock ────────────────────────────────────────────────────
-// Prevents a duplicate gateway (e.g. Task Scheduler restart racing a manual
+// Prevents a duplicate gateway (e.g. systemd restart racing a manual
 // start) from polling the same bot and stealing updates.
 const LOCK_DIR = join(import.meta.dirname, "logs");
 const LOCK_TARGET = join(LOCK_DIR, "gateway.instance");

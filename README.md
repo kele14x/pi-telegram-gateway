@@ -36,6 +36,8 @@
 ## 🧰 Requirements
 
 - Node.js ≥ 24 (runs TypeScript natively, no build step)
+- Linux with a systemd user manager for managed background operation;
+  foreground operation uses `npm start`
 - A pi install with a configured model key in `~/.pi/agent/auth.json`
 - A bot token from [@BotFather](https://t.me/BotFather)
 
@@ -98,20 +100,23 @@ The bot's command menu (`/` button) is synced automatically at startup via
 
 ## 🔄 Background operation and autostart
 
-The npm lifecycle commands choose Windows Task Scheduler or a Linux systemd
-user service automatically:
+Managed background operation uses a Linux systemd user service:
 
 ```bash
 npm run autostart:setup   # register/refresh autostart; does not start the bot
-npm run start:daemon     # start the registered task/service now
-npm run status           # inspect task/service status
+npm run start:daemon     # start the registered service now
+npm run status           # inspect service status
 npm run stop             # stop the managed gateway and its child processes
 npm run autostart:remove # stop and remove autostart; keep config/data/logs
 ```
 
-Foreground operation remains `npm start`; stop it with Ctrl+C. Managed startup
-requires Task Scheduler on Windows or a working systemd user manager on Linux.
-On other operating systems or containers without systemd, use `npm start`.
+Foreground operation remains `npm start`; stop it with Ctrl+C. Managed daemon
+commands require Linux with a working systemd user manager. On other operating
+systems or containers without systemd, use `npm start`.
+
+The gateway holds an atomic, heartbeat-backed single-instance lock
+(`logs/gateway.instance.lock`, with owner metadata in `logs/gateway.lock`) so
+a manual `npm start` cannot run a second, conflicting poller in the same checkout.
 
 On `SIGINT` (Ctrl+C) or `SIGTERM`, the gateway cancels queued work, requests
 abort from all sessions concurrently, and waits for current jobs and pending
@@ -120,14 +125,17 @@ exiting. Chats with unfinished prompts receive an interruption notice when deliv
 succeeds; resend unfinished requests after restarting. A forced process kill
 bypasses this graceful shutdown.
 
-### Linux
+### Service setup
 
 Run `npm run autostart:setup` as your normal user, without `sudo`. It writes
 `~/.config/systemd/user/pi-telegram-gateway.service` (or
 `$XDG_CONFIG_HOME/systemd/user/pi-telegram-gateway.service`) and enables it for
 login startup. Start it immediately with `npm run start:daemon`. The service
-restarts 1 minute after a failure and stops all child processes, including
-agent tools, on `npm run stop`.
+restarts 1 minute after a failure. `npm run stop` requests graceful shutdown
+and stops all child processes, including agent tools. A manual stop does not
+trigger an automatic restart; start it again with `npm run start:daemon`.
+Autostart remains enabled for the next user-manager startup (normally at login,
+or at boot with lingering). Use `npm run autostart:remove` to remove autostart.
 
 Node loads `.env` from the repository; credentials are never copied into the
 unit. The service uses your existing pi configuration in `~/.pi/agent`, pins
@@ -135,9 +143,10 @@ the absolute Node and repository paths, and preserves the PATH available at
 setup time. Put proxy configuration in `.env` so the service receives it even
 when the user manager has a different environment from your shell.
 
-Logs go to `logs/gateway.log` and `logs/gateway-err.log`, with the same bounded
-pre-launch rotation as Windows. `npm run status` shows service state and PID;
-it does not print conversation history or log contents on Linux.
+Logs go to `logs/gateway.log` and `logs/gateway-err.log`. Before each managed
+launch, non-empty logs are moved into `logs/archive/`; the newest 20 archives
+are retained for each log type. `npm run status` shows service state and PID;
+it does not print conversation history or log contents.
 
 Re-run setup after moving the repo, changing your PATH, or upgrading Node.
 Refreshing an existing service stops it; run `npm run start:daemon` afterward.
@@ -148,38 +157,6 @@ User services normally run while your login session is active. To keep the bot
 running after logout and start it at boot, optionally enable lingering with
 `loginctl enable-linger "$USER"` (your system may require administrator
 authorization). See [systemd user lingering](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html#enable-linger%20%5BUSER%E2%80%A6%5D).
-
-### Windows
-
-A Scheduled Task keeps the gateway alive across logons and crashes:
-
-```powershell
-# register or refresh the 'pi-telegram-gateway' task
-npm run autostart:setup
-
-# start it right now
-npm run start:daemon
-
-# check status
-npm run status
-
-# stop and remove the task + generated launcher (keeps config/data/logs)
-npm run autostart:remove
-```
-
-The task runs the gateway in the foreground (logs to `logs/gateway.log`) so
-Task Scheduler restarts it 1 minute after a crash. The gateway holds an atomic,
-heartbeat-backed single-instance lock (`logs/gateway.instance.lock`, with
-owner metadata in `logs/gateway.lock`) so a manual `npm start` cannot run a
-second, conflicting poller. Re-run `npm run autostart:setup` after moving the
-repo or upgrading Node (it pins the Node and repository paths at setup time).
-Setup first removes any existing task using the old absolute paths recorded in
-its XML, so it also works when the repository has already moved. For a planned
-move, `npm run autostart:remove` before moving and `npm run autostart:setup`
-afterward is the clearest workflow. Removal never deletes `.env`, sessions, or
-log files.
-Before each managed launch, non-empty logs are moved into `logs/archive/`; the
-newest 20 archives are retained for each log type.
 
 ## 🗃️ Sessions & working folders
 
@@ -237,7 +214,6 @@ That holds for any software you run from git.
 
 ```bash
 npm test              # run the nine offline regression scripts
-npm run test:windows  # offline Windows task-management tests (PowerShell)
 npm run typecheck     # tsc --noEmit
 npm run selftest      # real model prompt using pi credentials (no Telegram bot needed)
 node test/commands-scope.mjs  # online diagnostic: reads .env and calls Telegram
@@ -245,7 +221,7 @@ node test/commands-scope.mjs  # online diagnostic: reads .env and calls Telegram
 
 The `npm test` suite covers Markdown formatting/streaming/chunking/retries, `/cwd` and project context,
 chat metadata, settings isolation, instance locking, errors/history removal/redaction,
-shutdown, log rotation, and OS dispatch/Linux service management. It uses mocks
+shutdown, log rotation, and Linux service management. It uses mocks
 and temporary fixtures without contacting Telegram or a model provider.
 The command-scope diagnostic inspects the bot's registered menus and is run
 manually, separately from the offline suite. `selftest` sends a real model prompt
@@ -263,9 +239,8 @@ session-errors.ts    terminal-vs-retry model error buffering
 telegram-stream.ts   live streaming + chunking into editable messages
 telegram-format.ts   Markdown to native Telegram text/entities + safe chunking
 scripts/rotate-logs.mjs  bounded pre-launch log rotation
-scripts/service.mjs      OS-aware lifecycle command dispatch
 scripts/linux-service.mjs  systemd user-service setup and management
-test/                offline regressions, Windows task tests, online command-menu diagnostic
+test/                offline regressions, online command-menu diagnostic
 sessions/            per-chat session files (gitignored)
 ```
 

@@ -5,20 +5,17 @@ import { fileURLToPath } from "node:url";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(root, "..", "package.json"), "utf8"));
-const manager = process.platform === "win32" ? "Windows scheduled task"
-  : process.platform === "linux" ? "Linux systemd user service" : "supported OS service manager";
 
 const SCRIPT_DESC = {
   start: "run the gateway in the foreground (visible output)",
-  "start:daemon": `start it in the background via the ${manager}`,
-  "autostart:setup": `register or safely refresh the ${manager}`,
+  "start:daemon": "start it in the background via the Linux systemd user service",
+  "autostart:setup": "register or safely refresh the Linux systemd user service",
   "autostart:remove": "stop and remove autostart; keep config/data/logs",
   stop: "stop the managed gateway and its child processes",
-  status: "show service/task status and process PID",
+  status: "show user-service status and process PID",
   help: "this cheat sheet",
   selftest: "send one real model prompt through the pi SDK (may incur cost; no Telegram bot needed)",
   test: "run the nine offline regression scripts",
-  "test:windows": "run offline Windows task-management tests",
   typecheck: "type-check the TypeScript sources (tsc --noEmit)",
 };
 
@@ -33,17 +30,13 @@ console.log(`
 MANUAL ONLINE DIAGNOSTIC (excluded from npm test):
   node test/commands-scope.mjs
     inspect scoped command menus; reads .env and calls Telegram`);
-if (process.platform === "win32") console.log(`
-  setup-autostart.ps1    register/refresh the scheduled task
-  remove-autostart.ps1   stop and remove the task; keep config/data/logs
-  generated launcher: ./gateway-hidden.vbs`);
-else if (process.platform === "linux") console.log(`
+if (process.platform === "linux") console.log(`
   Linux: systemctl --user (no sudo); autostart runs at login.
   Unit: ~/.config/systemd/user/pi-telegram-gateway.service
         or $XDG_CONFIG_HOME/systemd/user/pi-telegram-gateway.service
   Setup registers the service; npm run start:daemon starts it now.
   A foreground npm start is stopped with Ctrl+C.`);
-else console.log("\n  Managed startup supports Windows and Linux; use npm start on this OS.");
+else console.log("\n  Managed daemon commands require Linux with systemd; use npm start on this OS.");
 
 console.log("TELEGRAM BOT COMMANDS (send to @your_bot in chat):\n");
 const botCmds = [
@@ -62,7 +55,7 @@ for (const [cmd, desc] of botCmds) console.log(`  ${cmd.padEnd(18)} ${desc}`);
 console.log(`
 KEY PATHS:
   logs/gateway.log      runtime log
-  logs/gateway-err.log  managed stderr log on Linux / manual Windows launches
+  logs/gateway-err.log  managed stderr log
   logs/archive/         newest 20 pre-launch archives per log type
   sessions/chat-<id>.jsonl   per-chat conversation history
   .env                  config (bot token, allowlist) — never committed

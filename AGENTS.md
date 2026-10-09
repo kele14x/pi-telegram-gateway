@@ -77,14 +77,9 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 | `telegram-stream.ts` | `TelegramStream`: live edits, chunking >3900 chars, ~800 ms edit throttle, 429 retry (retry-after honored, cap 30 s) |
 | `telegram-format.ts` | Markdown to native Telegram text/entities; UTF-16-safe chunking after rendering so formatting spans survive message splits |
 | `scripts/rotate-logs.mjs` | archives non-empty logs before managed launches and retains 20 archives per log type |
-| `scripts/service.mjs` | OS-aware npm lifecycle dispatch: Windows task scripts or Linux user-service manager |
 | `scripts/linux-service.mjs` | safely installs/removes a per-user systemd unit; login startup, crash recovery, child-process cleanup, no embedded credentials |
-| `setup-autostart.ps1` | safely replaces and registers Windows Scheduled Task `pi-telegram-gateway` (logon start, crash-restart, hidden window via generated `gateway-hidden.vbs`) |
-| `remove-autostart.ps1` | idempotent task/launcher cleanup; reads the existing task XML so a task registered from an old repo path can be removed safely without deleting config/data/logs |
-| `start-gateway.ps1` / `stop.ps1` / `status.ps1` | manual start (detached), clean stop (kills leaked task tree), status overview |
 | `scripts/help.mjs` | `npm run help` cheat sheet |
-| `test/` | `npm test` runs nine offline scripts: `stream-test.mjs` (formatting/chunking/retry), `cd-test.mjs` (cwd override reopen), `chat-meta-test.mjs` (meta.json parse/write), `settings-test.mjs` (settings isolation), `lock-test.mjs` (instance lock), `residual-test.mjs` (errors/history removal/redaction), `shutdown-test.mjs` (abort/delivery/deadline), `rotation-test.mjs` (log rotation), `service-test.mjs` (OS dispatch/Linux service management) |
-| `test/autostart-test.ps1` | separate offline Windows task-management tests, run with `npm run test:windows` |
+| `test/` | `npm test` runs nine offline scripts: `stream-test.mjs` (formatting/chunking/retry), `cd-test.mjs` (cwd override reopen), `chat-meta-test.mjs` (meta.json parse/write), `settings-test.mjs` (settings isolation), `lock-test.mjs` (instance lock), `residual-test.mjs` (errors/history removal/redaction), `shutdown-test.mjs` (abort/delivery/deadline), `rotation-test.mjs` (log rotation), `service-test.mjs` (Linux service management) |
 | `test/commands-scope.mjs` | manual online command-menu diagnostic: reads `.env` and calls Telegram; excluded from `npm test` |
 | `sessions/` | runtime data: per-chat `.jsonl` histories + `meta.json` (per-chat cwd/model/thinking) — **gitignored** |
 
@@ -96,8 +91,8 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
    When changing code, search for accidental secrets before committing.
 2. **Preserve the single-instance guarantee.** `index.ts` atomically acquires
    the heartbeat lock `logs/gateway.instance.lock` and writes owner metadata to
-   `logs/gateway.lock` (`isSelftest` skips this). Do not weaken it; the scheduled
-   task's crash-restart depends on stale-lock recovery and owner-safe release.
+   `logs/gateway.lock` (`isSelftest` skips this). Do not weaken it; systemd
+   crash recovery depends on stale-lock recovery and owner-safe release.
 3. **Keep Telegram constraints enforced in `TelegramStream`:** 4096-char
    message limit (seal at 3900), throttled edits, 429 retry. Telegram has no
    patience for rapid edits; do not add unbounded edit loops.
@@ -144,22 +139,20 @@ Model credentials come from `~/.pi/agent/` — never embed keys in code.
 - **Tests mirror the areas they cover:** streaming/chunking changes → add a
   scenario to `test/stream-test.mjs`; session/cwd logic → extend
   `test/cd-test.mjs`. Keep tests offline (mock bots, no Telegram).
-- **Ops on the dev machine (Windows):**
-  - `npm run start` (foreground, debugging) / `npm run start:daemon`
-    (background via scheduled task, hidden window, crash-restart) /
-    `npm run stop` / `npm run status`.
-  - gateway runs detached via Task Scheduler; logs to `logs/gateway.log`;
-    `logs/archive/` keeps the newest 20 rotated pre-launch logs per log type.
-  - `git pull` from upstream is fine but review diffs — the gateway holds
-    shell access to the machine (public repo; supply-chain caution).
-- Runs on Windows (paths, PowerShell scripts); keep cross-platform where free,
-  but never break Windows behavior (hidden-window task scripts).
-- **Linux ops:** the same `autostart:setup`, `start:daemon`, `stop`, `status`,
+- **Linux ops:** `autostart:setup`, `start:daemon`, `stop`, `status`,
   and `autostart:remove` npm commands use `systemctl --user` (no sudo).
   Setup enables login startup without starting the bot; optional user lingering
-  allows boot startup and operation after logout. `test/service-test.mjs` uses
+  allows boot startup and operation after logout. Manual stop requests graceful
+  shutdown and does not trigger automatic restart; autostart stays enabled.
+  Logs go to `logs/gateway.log` and `logs/gateway-err.log`; `logs/archive/`
+  keeps the newest 20 rotated pre-launch logs per log type. `test/service-test.mjs` uses
   a fake service manager and temporary files; never install/start a real unit
   merely to run tests. Stop foreground `npm start` with Ctrl+C.
+- Managed daemon commands support Linux only. Foreground operation remains
+  available through `npm start` on other platforms; Windows task scripts and
+  their tests have been removed.
+- `git pull` from upstream is fine but review diffs — the gateway holds
+  shell access to the machine (public repo; supply-chain caution).
 
 ## Repo hygiene
 

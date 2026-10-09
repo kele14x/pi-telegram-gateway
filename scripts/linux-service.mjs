@@ -158,7 +158,7 @@ export function manageLinuxService(action, {
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   try {
-    if (process.platform !== "linux") throw new Error("This service manager requires Linux.");
+    if (process.platform !== "linux") throw new Error("Managed daemon commands require Linux with systemd; use npm start for foreground operation.");
     manageLinuxService(process.argv[2]);
   } catch (error) {
     console.error(error.message);

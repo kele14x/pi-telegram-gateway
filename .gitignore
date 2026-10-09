@@ -3,4 +3,3 @@ node_modules/
 sessions/
 *.log
 logs/
-gateway-hidden.vbs

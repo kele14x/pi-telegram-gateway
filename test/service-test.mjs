@@ -3,31 +3,12 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { serviceCommand } from "../scripts/service.mjs";
 import { buildLinuxUnit, manageLinuxService, UNIT_NAME } from "../scripts/linux-service.mjs";
 
-const actions = ["autostart:setup", "autostart:remove", "start:daemon", "stop", "status"];
-for (const action of actions) {
-  const linux = serviceCommand(action, "linux", "/gateway with spaces", "/custom/node");
-  assert.equal(linux.command, "/custom/node");
-  assert.deepEqual(linux.args, [join("/gateway with spaces", "scripts", "linux-service.mjs"), action]);
-  const windows = serviceCommand(action, "win32", "/gateway with spaces");
-  if (action === "start:daemon") {
-    assert.equal(windows.command, "schtasks");
-    assert.deepEqual(windows.args, ["/Run", "/TN", "pi-telegram-gateway"]);
-  } else {
-    assert.equal(windows.command, "powershell");
-    assert.deepEqual(windows.args.slice(0, 4), ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
-    const script = { "autostart:setup": "setup-autostart.ps1", "autostart:remove": "remove-autostart.ps1", stop: "stop.ps1", status: "status.ps1" }[action];
-    assert.equal(windows.args[4], join("/gateway with spaces", script));
-  }
-}
-assert.throws(() => serviceCommand("status", "darwin"), /unsupported.*npm start/);
-assert.throws(() => serviceCommand("delete-everything"), /Usage/);
+assert.throws(() => manageLinuxService("delete-everything"), /Unknown Linux service action/);
 assert.throws(() => buildLinuxUnit("/repo\nExecStart=bad", process.execPath, "/bin"), /control characters/);
 
-// Exercise quote/backslash escaping as strings; these names cannot be created
-// on Windows, so keep them out of the filesystem lifecycle fixtures below.
+// Exercise quote/backslash escaping independently of filesystem fixtures.
 const escapingUnit = buildLinuxUnit('/synthetic/repo 中文 $cash %name "quote" \\path', process.execPath, '/custom/bin:$PATH:/quoted " bin');
 assert(escapingUnit.includes('\\"quote\\"') && escapingUnit.includes('\\\\path'));
 
@@ -85,7 +66,7 @@ try {
   assert(unit.includes('$cash'), "literal dollar signs must survive command generation");
   assert(unit.includes('ExecStart=:"'), "systemd variable substitution must be disabled");
   assert(!unit.includes("SYNTHETIC_CONFIG"), "unit must not embed .env contents");
-  if (process.platform !== "win32") assert.equal(statSync(unitPath).mode & 0o777, 0o600);
+  assert.equal(statSync(unitPath).mode & 0o777, 0o600);
   reset();
 
   perform("start:daemon");
@@ -119,8 +100,7 @@ try {
   // Refresh/removal must stop the unit previously registered at an old root.
   const movedRoot = join(temporary, "moved repo");
   manageLinuxService("autostart:setup", { ...options, root: movedRoot });
-  // Quoted command arguments escape Windows path separators in the unit text.
-  const movedEntry = join(movedRoot, "index.ts").replaceAll("\\", "\\\\");
+  const movedEntry = join(movedRoot, "index.ts");
   assert(readFileSync(unitPath, "utf8").includes(movedEntry));
   assert.deepEqual(changes(), ["stop", "disable", "daemon-reload", "enable"]);
   reset();
@@ -162,14 +142,12 @@ try {
   loadedPath = "";
   reset();
 
-  if (process.platform !== "win32") {
-    const foreign = join(temporary, "foreign.service");
-    writeFileSync(foreign, buildLinuxUnit(root, process.execPath, "/bin"));
-    symlinkSync(foreign, unitPath);
-    assert.throws(() => perform("autostart:setup"), /not managed/);
-    assert.deepEqual(changes(), []);
-    rmSync(unitPath);
-  }
+  const foreign = join(temporary, "foreign.service");
+  writeFileSync(foreign, buildLinuxUnit(root, process.execPath, "/bin"));
+  symlinkSync(foreign, unitPath);
+  assert.throws(() => perform("autostart:setup"), /not managed/);
+  assert.deepEqual(changes(), []);
+  rmSync(unitPath);
 
   assert.throws(() => manageLinuxService("autostart:setup", { ...options, env: { XDG_CONFIG_HOME: "relative" } }), /absolute path/);
   assert(!existsSync(join(home, ".config")), "XDG config override was ignored");
@@ -177,7 +155,7 @@ try {
   manageLinuxService("autostart:setup", { ...options, env: { PATH: "/bin" } });
   assert(existsSync(join(home, ".config", "systemd", "user", UNIT_NAME)));
 
-  console.log("OS dispatch and Linux user-service tests passed ✅");
+  console.log("Linux user-service tests passed ✅");
 } finally {
   rmSync(temporary, { recursive: true, force: true });
 }
