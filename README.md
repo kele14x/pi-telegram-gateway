@@ -232,11 +232,20 @@ That holds for any software you run from git.
 ## 🔬 Development
 
 ```bash
-npm test          # offline tests: stream, /cd, settings isolation, instance lock
-npm run selftest  # create a session and run one prompt (no Telegram bot needed)
-npm run typecheck # tsc --noEmit
-node test/commands-scope.mjs  # inspect the bot's per-scope command menus
+npm test              # run the nine offline regression scripts
+npm run test:windows  # offline Windows task-management tests (PowerShell)
+npm run typecheck     # tsc --noEmit
+npm run selftest      # real model prompt using pi credentials (no Telegram bot needed)
+node test/commands-scope.mjs  # online diagnostic: reads .env and calls Telegram
 ```
+
+The `npm test` suite covers streaming/chunking/retries, `/cd` and project context,
+chat metadata, settings isolation, instance locking, errors/history removal/redaction,
+shutdown, log rotation, and OS dispatch/Linux service management. It uses mocks
+and temporary fixtures without contacting Telegram or a model provider.
+The command-scope diagnostic inspects the bot's registered menus and is run
+manually, separately from the offline suite. `selftest` sends a real model prompt
+and may incur model usage costs.
 
 Layout:
 
@@ -251,7 +260,7 @@ telegram-stream.ts   live streaming + chunking into editable messages
 scripts/rotate-logs.mjs  bounded pre-launch log rotation
 scripts/service.mjs      OS-aware lifecycle command dispatch
 scripts/linux-service.mjs  systemd user-service setup and management
-test/                offline tests
+test/                offline regressions, Windows task tests, online command-menu diagnostic
 sessions/            per-chat session files (gitignored)
 ```
 

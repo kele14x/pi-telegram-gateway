@@ -16,8 +16,8 @@ const SCRIPT_DESC = {
   stop: "stop the managed gateway and its child processes",
   status: "show service/task status and process PID",
   help: "this cheat sheet",
-  selftest: "send one prompt through the pi SDK (no Telegram bot needed)",
-  test: "run the offline unit tests",
+  selftest: "send one real model prompt through the pi SDK (may incur cost; no Telegram bot needed)",
+  test: "run the nine offline regression scripts",
   "test:windows": "run offline Windows task-management tests",
   typecheck: "type-check the TypeScript sources (tsc --noEmit)",
 };
@@ -29,6 +29,10 @@ for (const [name, script] of Object.entries(pkg.scripts ?? {})) {
   const desc = SCRIPT_DESC[name] ?? "";
   console.log(`  npm run ${name.padEnd(18)} ${desc}`);
 }
+console.log(`
+MANUAL ONLINE DIAGNOSTIC (excluded from npm test):
+  node test/commands-scope.mjs
+    inspect scoped command menus; reads .env and calls Telegram`);
 if (process.platform === "win32") console.log(`
   setup-autostart.ps1    register/refresh the scheduled task
   remove-autostart.ps1   stop and remove the task; keep config/data/logs

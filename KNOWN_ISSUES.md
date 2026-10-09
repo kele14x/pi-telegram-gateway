@@ -1,6 +1,6 @@
 # Known issues
 
-Open issues: **19** — P0: **0**, P1: **3**, P2: **16**.
+Open issues: **18** — P0: **0**, P1: **3**, P2: **15**.
 
 Issue IDs are retained from earlier reviews and stay unchanged when resolved.
 
@@ -56,12 +56,6 @@ Lower-impact behavior, diagnostic gaps, and documentation or test improvements.
   but the reason is not logged through the gateway.
   **Where:** `instance-lock.ts`.
   **Fix:** Add an explicit `onCompromised` callback that logs safely and exits.
-
-- **#11 — Development documentation is out of date.** The test lists omit coverage
-  and describe `commands-scope.mjs` as offline even though it reads `.env` and
-  calls Telegram.
-  **Where:** `AGENTS.md`, `README.md`, `scripts/help.mjs`.
-  **Fix:** Update test descriptions to match the current validation commands.
 
 - **#12 — Lock/log location is fixed to the checkout.** Sessions have a configurable
   directory, while the gateway lock and logs remain under the repository.
@@ -138,6 +132,12 @@ Lower-impact behavior, diagnostic gaps, and documentation or test improvements.
   separate bot token and pi configuration for each independent Linux user.
 
 ## Resolved
+
+- **#11 — Development documentation was out of date.** `AGENTS.md`, `README.md`,
+  and `npm run help` now describe the nine offline regression scripts, the separate
+  Windows task tests, and the real model selftest. `commands-scope.mjs` is documented
+  as a manual online diagnostic that reads `.env` and calls Telegram, excluded
+  from `npm test`.
 
 - **#4 — Shutdown truncated replies.** `SIGINT`/`SIGTERM` now stop accepting
   work, invalidate queued jobs, clear SDK queues, abort sessions concurrently,
