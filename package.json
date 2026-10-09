@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env index.ts",
     "start:daemon": "node scripts/linux-service.mjs start:daemon",
+    "restart:daemon": "node scripts/linux-service.mjs restart:daemon",
     "autostart:setup": "node scripts/linux-service.mjs autostart:setup",
     "autostart:remove": "node scripts/linux-service.mjs autostart:remove",
     "stop": "node scripts/linux-service.mjs stop",

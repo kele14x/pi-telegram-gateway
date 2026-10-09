@@ -139,11 +139,14 @@ Model credentials come from `~/.pi/agent/` — never embed keys in code.
 - **Tests mirror the areas they cover:** streaming/chunking changes → add a
   scenario to `test/stream-test.mjs`; session/cwd logic → extend
   `test/cd-test.mjs`. Keep tests offline (mock bots, no Telegram).
-- **Linux ops:** `autostart:setup`, `start:daemon`, `stop`, `status`,
+- **Linux ops:** `autostart:setup`, `start:daemon`, `restart:daemon`, `stop`, `status`,
   and `autostart:remove` npm commands use `systemctl --user` (no sudo).
   Setup enables login startup without starting the bot; optional user lingering
   allows boot startup and operation after logout. Manual stop requests graceful
   shutdown and does not trigger automatic restart; autostart stays enabled.
+  `restart:daemon` uses the same graceful shutdown before starting again, or
+  starts an installed service if stopped. It cancels active/queued work, keeps
+  saved history, and leaves autostart settings unchanged.
   Logs go to `logs/gateway.log` and `logs/gateway-err.log`; `logs/archive/`
   keeps the newest 20 rotated pre-launch logs per log type. `test/service-test.mjs` uses
   a fake service manager and temporary files; never install/start a real unit

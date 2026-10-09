@@ -9,6 +9,7 @@ const pkg = JSON.parse(readFileSync(join(root, "..", "package.json"), "utf8"));
 const SCRIPT_DESC = {
   start: "run the gateway in the foreground (visible output)",
   "start:daemon": "start it in the background via the Linux systemd user service",
+  "restart:daemon": "restart the Linux service with graceful shutdown; start it if stopped",
   "autostart:setup": "register or safely refresh the Linux systemd user service",
   "autostart:remove": "stop and remove autostart; keep config/data/logs",
   stop: "stop the managed gateway and its child processes",
@@ -35,6 +36,7 @@ if (process.platform === "linux") console.log(`
   Unit: ~/.config/systemd/user/pi-telegram-gateway.service
         or $XDG_CONFIG_HOME/systemd/user/pi-telegram-gateway.service
   Setup registers the service; npm run start:daemon starts it now.
+  npm run restart:daemon applies code/config changes; active work is cancelled.
   A foreground npm start is stopped with Ctrl+C.`);
 else console.log("\n  Managed daemon commands require Linux with systemd; use npm start on this OS.");
 

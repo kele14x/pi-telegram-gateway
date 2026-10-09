@@ -59,7 +59,7 @@ export function manageLinuxService(action, {
   run = spawnSync,
   print = console.log,
 } = {}) {
-  if (!["autostart:setup", "autostart:remove", "start:daemon", "stop", "status"].includes(action)) {
+  if (!["autostart:setup", "autostart:remove", "start:daemon", "restart:daemon", "stop", "status"].includes(action)) {
     throw new Error("Unknown Linux service action.");
   }
   const configHome = env.XDG_CONFIG_HOME || join(home, ".config");
@@ -151,8 +151,10 @@ export function manageLinuxService(action, {
     systemctl(["daemon-reload"]);
     print("Gateway user service removed. Configuration, sessions, and logs were kept.");
   } else {
-    systemctl([action === "start:daemon" ? "start" : "stop", UNIT_NAME]);
-    print(action === "start:daemon" ? "Gateway user service started." : "Gateway user service stopped.");
+    const command = action === "start:daemon" ? "start" : action === "restart:daemon" ? "restart" : "stop";
+    systemctl([command, UNIT_NAME]);
+    const result = { start: "started", restart: "restarted", stop: "stopped" }[command];
+    print(`Gateway user service ${result}.`);
   }
 }
 

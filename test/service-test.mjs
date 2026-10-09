@@ -33,7 +33,7 @@ try {
       return { status: 0, stdout: `LoadState=${loadedPath ? "loaded" : "not-found"}\nFragmentPath=${loadedPath}\nActiveState=${active ? "active" : "inactive"}\nSubState=${active ? "running" : "dead"}\nMainPID=${active ? "123" : "0"}\nResult=success\n` };
     }
     if (args[1] === "daemon-reload") loadedPath = existsSync(unitPath) ? unitPath : "";
-    if (args[1] === "start") active = true;
+    if (args[1] === "start" || args[1] === "restart") active = true;
     if (args[1] === "stop") active = false;
     return { status: 0, stdout: "", stderr: "" };
   };
@@ -47,6 +47,7 @@ try {
   writeFileSync(join(root, "sessions", "placeholder.jsonl"), "synthetic history\n");
 
   assert.throws(() => perform("start:daemon"), /autostart:setup first/);
+  assert.throws(() => perform("restart:daemon"), /autostart:setup first/);
   assert.deepEqual(changes(), []);
   reset();
   perform("autostart:remove");
@@ -61,6 +62,7 @@ try {
   const unit = readFileSync(unitPath, "utf8");
   assert(unit.includes("Restart=on-failure\nRestartSec=60s"));
   assert(unit.includes("KillMode=control-group"));
+  assert(unit.includes("TimeoutStopSec=30s"), "systemd must allow the gateway's ten-second graceful shutdown");
   assert(unit.includes("--env-file-if-exists=.env"));
   assert(unit.includes("%" + "%name"), "systemd specifiers must be escaped");
   assert(unit.includes('$cash'), "literal dollar signs must survive command generation");
@@ -73,6 +75,13 @@ try {
   assert(active);
   assert.deepEqual(changes(), ["start"]);
   reset();
+  perform("restart:daemon");
+  assert(active);
+  assert.deepEqual(changes(), ["restart"], "native restart must not change autostart or rewrite the service");
+  assert.deepEqual(calls.at(-1), ["restart", UNIT_NAME]);
+  assert(output.includes("Gateway user service restarted."));
+  assert.equal(readFileSync(unitPath, "utf8"), unit);
+  reset();
   perform("status");
   assert(output.some(line => line.includes("active (running)")));
   assert.deepEqual(changes(), [], "status must be read-only");
@@ -80,6 +89,24 @@ try {
   perform("stop");
   assert(!active);
   assert.deepEqual(changes(), ["stop"]);
+  reset();
+
+  perform("restart:daemon");
+  assert(active, "restart must also start a stopped service");
+  assert.deepEqual(changes(), ["restart"]);
+  assert.equal(readFileSync(unitPath, "utf8"), unit);
+  reset();
+
+  failure = "restart";
+  assert.throws(() => perform("restart:daemon"), error => {
+    assert.match(error.message, /restart failed/);
+    assert(!error.message.includes("synthetic-secret"), "service-manager output must not leak in errors");
+    return true;
+  });
+  assert.deepEqual(changes(), ["restart"]);
+  assert.equal(output.length, 0, "failed restart must not report success");
+  assert.equal(readFileSync(unitPath, "utf8"), unit);
+  failure = undefined;
   reset();
 
   perform("autostart:setup");
@@ -125,6 +152,7 @@ try {
   writeFileSync(unitPath, "# unrelated service\n[Service]\nExecStart=/bin/true\n");
   assert.throws(() => perform("autostart:setup"), /not managed/);
   assert.throws(() => perform("autostart:remove"), /not managed/);
+  assert.throws(() => perform("restart:daemon"), /not managed/);
   assert.deepEqual(changes(), []);
   rmSync(unitPath);
   reset();
@@ -132,12 +160,14 @@ try {
   loadedPath = join(temporary, "foreign", UNIT_NAME);
   assert.throws(() => perform("autostart:setup"), /another location/);
   assert.throws(() => perform("stop"), /another location/);
+  assert.throws(() => perform("restart:daemon"), /another location/);
   assert.deepEqual(changes(), []);
   loadedPath = "";
   reset();
 
   loadedPath = unitPath;
   assert.throws(() => perform("autostart:setup"), /file is missing/);
+  assert.throws(() => perform("restart:daemon"), /file is missing/);
   assert.deepEqual(changes(), []);
   loadedPath = "";
   reset();
@@ -146,6 +176,7 @@ try {
   writeFileSync(foreign, buildLinuxUnit(root, process.execPath, "/bin"));
   symlinkSync(foreign, unitPath);
   assert.throws(() => perform("autostart:setup"), /not managed/);
+  assert.throws(() => perform("restart:daemon"), /not managed/);
   assert.deepEqual(changes(), []);
   rmSync(unitPath);
 

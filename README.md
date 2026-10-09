@@ -105,6 +105,7 @@ Managed background operation uses a Linux systemd user service:
 ```bash
 npm run autostart:setup   # register/refresh autostart; does not start the bot
 npm run start:daemon     # start the registered service now
+npm run restart:daemon   # gracefully stop and restart it; start it if stopped
 npm run status           # inspect service status
 npm run stop             # stop the managed gateway and its child processes
 npm run autostart:remove # stop and remove autostart; keep config/data/logs
@@ -124,6 +125,13 @@ Telegram replies for up to **10 seconds total** before disposing sessions and
 exiting. Chats with unfinished prompts receive an interruption notice when delivery
 succeeds; resend unfinished requests after restarting. A forced process kill
 bypasses this graceful shutdown.
+
+Use `npm run restart:daemon` after changing code or `.env`. It runs
+`systemctl --user restart pi-telegram-gateway.service`, following the same
+graceful shutdown before starting again. It also starts an installed service
+that is currently stopped. Active work and queued prompts are cancelled;
+saved chat history is retained. Restart leaves autostart settings unchanged
+and requires an existing service registered with `npm run autostart:setup`.
 
 ### Service setup
 
