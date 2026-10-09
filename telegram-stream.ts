@@ -1,8 +1,8 @@
 /**
  * Renders one agent run (one user message → agent_end) into Telegram.
- * Text accumulates into an editable message; when it grows past MAX_CHUNK the
- * full part is sealed and a fresh follow-up message continues the stream, so
- * long outputs never hit Telegram's single-message size limit.
+ * Markdown is rendered into native Telegram entities, then split at MAX_CHUNK.
+ * Earlier messages are reconciled when completing Markdown changes their text
+ * or formatting, so long outputs keep formatting across message boundaries.
  *
  * Concurrency model:
  * - Every Telegram send/edit is serialized through a private promise chain
@@ -15,20 +15,13 @@
  */
 
 import type { Telegraf } from "telegraf";
+import { chunkEnd, renderMarkdown, splitFormatted, type FormattedText } from "./telegram-format.ts";
+export { chunkEnd } from "./telegram-format.ts";
 
 const MAX_CHUNK = 3900; // Telegram hard limit is 4096 chars
 const EDIT_MIN_INTERVAL_MS = 800;
 const MAX_DELIVERY_ATTEMPTS = 4;
 const TRANSIENT_RETRY_BASE_MS = 500;
-
-/** A UTF-16 boundary that never separates a surrogate pair. */
-export function chunkEnd(text: string, limit: number): number {
-  let end = Math.min(limit, text.length);
-  if (end > 0 && end < text.length &&
-      text.charCodeAt(end - 1) >= 0xd800 && text.charCodeAt(end - 1) <= 0xdbff &&
-      text.charCodeAt(end) >= 0xdc00 && text.charCodeAt(end) <= 0xdfff) end--;
-  return end;
-}
 
 export type StreamLogger = (...args: unknown[]) => void;
 
@@ -36,9 +29,9 @@ const defaultLog: StreamLogger = (...args) => {
   console.log(new Date().toISOString(), ...args);
 };
 
-interface Segment {
-  text: string;
+interface Segment extends FormattedText {
   msgId: number | null;
+  delivered: string;
   /** Increments whenever the desired content for this segment changes. */
   version: number;
 }
@@ -46,7 +39,9 @@ interface Segment {
 interface DeliveryOp {
   seg: Segment;
   text: string;
+  entities: FormattedText["entities"];
   version: number;
+  remove?: boolean;
 }
 
 function retryAfterSeconds(err: unknown): number | undefined {
@@ -90,9 +85,9 @@ function delay(ms: number): Promise<void> {
 export class TelegramStream {
   private bot: Telegraf;
   private chatId: number;
-  private segments: Segment[] = [{ text: "", msgId: null, version: 0 }];
-  /** Deltas not yet moved into a segment (overflow buffer). */
-  private pending = "";
+  private segments: Segment[] = [];
+  /** Markdown is retained for the whole run; message boundaries follow rendering. */
+  private source = "";
   private status = "…";
   private lastEditAt = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -115,12 +110,8 @@ export class TelegramStream {
     this.log = log;
   }
 
-  private get open() {
-    return this.segments[this.segments.length - 1];
-  }
-
   hasText(): boolean {
-    return this.segments.some((s) => s.text.length > 0) || this.pending.length > 0;
+    return this.source.length > 0;
   }
 
   /** Begin a new run (new user message). */
@@ -128,8 +119,8 @@ export class TelegramStream {
     this.runId++;
     this.finished = false;
     this.canceled = false;
-    this.pending = "";
-    this.segments = [{ text: "", msgId: null, version: 0 }];
+    this.source = "";
+    this.segments = [];
     this.status = "…";
     this.lastEditAt = 0;
     this.deliveryFailures.clear();
@@ -144,7 +135,8 @@ export class TelegramStream {
     this.runId++;
     this.finished = true;
     this.canceled = true;
-    this.pending = "";
+    this.invalidate();
+    this.source = "";
     this.deliveryFailures.clear();
     if (this.timer) {
       clearTimeout(this.timer);
@@ -154,9 +146,9 @@ export class TelegramStream {
 
   setStatus(text: string) {
     if (this.finished || this.canceled) return;
-    // Status is only rendered when the open segment has no text. Treat a
+    // Status is only rendered when the run has no text. Treat a
     // status-only change as a segment-content change for retry invalidation.
-    if (this.open.text.length === 0) this.open.version++;
+    if (!this.hasText()) this.invalidate();
     this.status = text;
     this.scheduleEdit(true);
   }
@@ -166,37 +158,51 @@ export class TelegramStream {
     // The initial "thinking" status is no longer useful once real answer text
     // exists. This also avoids a stray status-only message at exactly 3900 chars.
     this.status = "…";
-    this.pending += delta;
-    this.drainPending();
+    this.source += delta;
+    this.invalidate();
     this.scheduleEdit(false);
   }
 
-  private drainPending(final = false) {
-    // Move pending into segments immediately; full segments are sealed here so
-    // their text is never clipped by Telegram's 4096-char message limit.
-    while (this.pending.length > 0) {
-      const seg = this.open;
-      const room = MAX_CHUNK - seg.text.length;
-      if (room <= 0) {
-        this.segments.push({ text: "", msgId: null, version: 0 });
-        continue;
-      }
-      let take = chunkEnd(this.pending, room);
-      // A provider delta may end halfway through an emoji. Wait for the next
-      // delta before exposing that high surrogate to Telegram.
-      const last = this.pending.charCodeAt(take - 1);
-      if (!final && take === this.pending.length && last >= 0xd800 && last <= 0xdbff) take--;
-      if (take === 0) {
-        if (room === 1 && this.pending.length > 1) {
-          this.segments.push({ text: "", msgId: null, version: 0 });
-          continue;
-        }
-        break;
-      }
-      seg.text += this.pending.slice(0, take);
-      seg.version++;
-      this.pending = this.pending.slice(take);
+  private invalidate() {
+    // A closing Markdown delimiter can change earlier text and entity offsets.
+    // Invalidate retries for every segment before the next rendering pass.
+    for (const seg of this.segments) seg.version++;
+  }
+
+  private reconcile(final = false, extra?: string): DeliveryOp[] {
+    let source = this.source;
+    const last = source.charCodeAt(source.length - 1);
+    // Wait for the low surrogate if an emoji straddles provider deltas.
+    if (last >= 0xd800 && last <= 0xdbff) {
+      source = source.slice(0, -1) + (final ? "\ufffd" : "");
     }
+    const value = source ? renderMarkdown(source) : { text: "", entities: [] };
+    if (extra) value.text += (value.text ? "\n" : "") + extra;
+    if (!value.text && !this.hasText() && this.status !== "…") value.text = this.status;
+    const chunks = splitFormatted(value, MAX_CHUNK);
+    const ops: DeliveryOp[] = [];
+    for (let i = 0; i < Math.max(chunks.length, this.segments.length); i++) {
+      const chunk = chunks[i] ?? { text: "", entities: [] };
+      let seg = this.segments[i];
+      if (!seg) {
+        seg = { ...chunk, msgId: null, delivered: "", version: 0 };
+        this.segments.push(seg);
+      } else if (seg.text !== chunk.text || JSON.stringify(seg.entities) !== JSON.stringify(chunk.entities)) {
+        seg.text = chunk.text;
+        seg.entities = chunk.entities;
+        seg.version++;
+      }
+      // A completed link/fence can shorten the rendering. Keep surplus message
+      // slots until finalization so later deltas can reuse them in order.
+      // Include unposted slots: an older send may still be in flight and assign
+      // its message id before this removal reaches the serialized I/O chain.
+      const remove = final && !chunk.text;
+      const payload = JSON.stringify(chunk);
+      if (remove || (chunk.text && (final || i === chunks.length - 1 || payload !== seg.delivered))) {
+        ops.push({ seg, ...chunk, version: seg.version, remove });
+      }
+    }
+    return ops;
   }
 
   private scheduleEdit(forceSoon: boolean) {
@@ -213,28 +219,42 @@ export class TelegramStream {
   }
 
   /** Create or update a segment's message on the serialized I/O chain. */
-  private editOrSend(seg: Segment, text: string, version = seg.version): Promise<void> {
+  private editOrSend({ seg, text, entities, version, remove }: DeliveryOp): Promise<void> {
     const op = this.ioChain.then(async () => {
       // A newer append/status/finalize has superseded this delivery operation.
-      if (this.canceled || version !== seg.version || !text) return;
+      if (this.canceled || version !== seg.version || (!text && !remove)) return;
       const clipped = text.slice(0, chunkEnd(text, 4096));
+      let useEntities = true;
       for (let attempt = 1; attempt <= MAX_DELIVERY_ATTEMPTS; attempt++) {
         if (this.canceled || version !== seg.version) return;
         try {
-          if (seg.msgId === null) {
-            const sent = await this.bot.telegram.sendMessage(this.chatId, clipped);
+          if (remove) {
+            if (seg.msgId !== null) await this.bot.telegram.deleteMessage(this.chatId, seg.msgId);
+            seg.msgId = null;
+          } else if (seg.msgId === null) {
+            const sent = await this.bot.telegram.sendMessage(this.chatId, clipped, { entities: useEntities ? entities : [] });
             seg.msgId = sent.message_id;
           } else {
-            await this.bot.telegram.editMessageText(this.chatId, seg.msgId, undefined, clipped);
+            await this.bot.telegram.editMessageText(this.chatId, seg.msgId, undefined, clipped, { entities: useEntities ? entities : [] });
           }
+          seg.delivered = JSON.stringify({ text, entities });
           this.lastEditAt = Date.now();
           this.deliveryFailures.delete(seg);
           return;
         } catch (err) {
           const msg = String((err as Error)?.message ?? err);
           if (msg.includes("message is not modified")) {
+            seg.delivered = JSON.stringify({ text, entities });
             this.deliveryFailures.delete(seg);
             return;
+          }
+          if (useEntities && entities.length && errorStatus(err) === 400 &&
+              /(?:parse entities|entity|entities|unsupported url|wrong http url)/i.test(msg)) {
+            // One formatting fallback, retaining the same transport retry bound.
+            useEntities = false;
+            attempt--;
+            this.log("[edit] Telegram rejected formatting; retrying as plain text");
+            continue;
           }
           const retryable = isRetryableDeliveryError(err);
           if (!retryable || attempt === MAX_DELIVERY_ATTEMPTS) {
@@ -258,20 +278,9 @@ export class TelegramStream {
   /** Throttled edit pass for the current run. */
   private flush(): Promise<void> {
     const segs = this.segments;
-    const status = this.status;
+    const ops = this.reconcile();
     const promise = (async () => {
-      // Post any sealed segments that never got a message.
-      for (let i = 0; i < segs.length - 1; i++) {
-        const seg = segs[i];
-        if (seg.msgId === null) await this.editOrSend(seg, seg.text, seg.version);
-      }
-      let seg = segs[segs.length - 1];
-      if (seg.text.length >= MAX_CHUNK) {
-        await this.editOrSend(seg, seg.text, seg.version);
-        segs.push({ text: "", msgId: null, version: 0 });
-        seg = segs[segs.length - 1];
-      }
-      await this.editOrSend(seg, seg.text || (status !== "…" ? status : ""), seg.version);
+      for (const op of ops) await this.editOrSend(op);
     })();
     const entry = { segs, promise };
     this.activeFlushes.push(entry);
@@ -290,10 +299,6 @@ export class TelegramStream {
   /** Finalize the run: flush everything, append `extra` if given. */
   async finalize(extra?: string) {
     if (this.finished || this.canceled) return;
-    // If a run ends with an incomplete provider delta, render a replacement
-    // character rather than sending an unpaired high surrogate.
-    if (this.pending.length === 1) this.pending = "\ufffd";
-    this.drainPending(true);
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
@@ -303,60 +308,20 @@ export class TelegramStream {
     // independent from the new run.
     this.finished = true;
     const segs = this.segments;
-    const status = this.status;
+    // Capture the rendering before yielding: reset() can start a new run while
+    // this finalization waits for older I/O.
+    this.invalidate();
+    const ops = this.reconcile(true, extra);
 
-    // Let a flush that already started finish planning against this snapshot
-    // before planning the final delivery. Flushes from a later reset are not
-    // included because the snapshot is captured above.
+    // Let an older flush drain before executing the captured final delivery.
+    // Flushes from a later reset are excluded by the captured snapshot.
     await Promise.all(
       this.activeFlushes
         .filter((flush) => flush.segs === segs)
         .map((flush) => flush.promise),
     );
 
-    // Plan the entire delivery against the snapshot, then drain it through the
-    // serialized I/O chain.
-    const ops: DeliveryOp[] = [];
-    // Reconcile every sealed segment, including one whose final edit failed
-    // after an earlier partial version had already received a message id.
-    for (let i = 0; i < segs.length - 1; i++) {
-      const seg = segs[i];
-      ops.push({ seg, text: seg.text, version: seg.version });
-    }
-
-    let seg = segs[segs.length - 1];
-    if (seg.text.length >= MAX_CHUNK) {
-      ops.push({ seg, text: seg.text, version: seg.version });
-      segs.push({ text: "", msgId: null, version: 0 });
-      seg = segs[segs.length - 1];
-    }
-
-    let lastText = seg.text;
-    if (extra) {
-      // Invalidate any retry for the pre-extra content.
-      seg.version++;
-      lastText = lastText ? `${lastText}\n${extra}` : extra;
-    }
-    if (!lastText && status && status !== "…") lastText = status;
-
-    if (lastText) {
-      // First ≤4096 chars go into the open segment's message; the rest become
-      // additional messages.
-      const firstEnd = chunkEnd(lastText, 4096);
-      ops.push({ seg, text: lastText.slice(0, firstEnd), version: seg.version });
-      for (let i = firstEnd; i < lastText.length;) {
-        const end = i + chunkEnd(lastText.slice(i), 4096);
-        const text = lastText.slice(i, end);
-        ops.push({
-          seg: { text, msgId: null, version: 0 },
-          text,
-          version: 0,
-        });
-        i = end;
-      }
-    }
-
-    for (const op of ops) void this.editOrSend(op.seg, op.text, op.version);
+    for (const op of ops) void this.editOrSend(op);
     // Resolve once everything planned above has executed.
     await this.ioChain;
     if (ops.some((op) => this.deliveryFailures.get(op.seg) === op.version)) {

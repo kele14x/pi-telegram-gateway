@@ -75,6 +75,7 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 | `instance-lock.ts` | atomic, heartbeat-backed single-instance lock plus ownership metadata |
 | `session-errors.ts` | defers assistant error rendering until `agent_end` determines whether the attempt will retry |
 | `telegram-stream.ts` | `TelegramStream`: live edits, chunking >3900 chars, ~800 ms edit throttle, 429 retry (retry-after honored, cap 30 s) |
+| `telegram-format.ts` | Markdown to native Telegram text/entities; UTF-16-safe chunking after rendering so formatting spans survive message splits |
 | `scripts/rotate-logs.mjs` | archives non-empty logs before managed launches and retains 20 archives per log type |
 | `scripts/service.mjs` | OS-aware npm lifecycle dispatch: Windows task scripts or Linux user-service manager |
 | `scripts/linux-service.mjs` | safely installs/removes a per-user systemd unit; login startup, crash recovery, child-process cleanup, no embedded credentials |
@@ -82,7 +83,7 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 | `remove-autostart.ps1` | idempotent task/launcher cleanup; reads the existing task XML so a task registered from an old repo path can be removed safely without deleting config/data/logs |
 | `start-gateway.ps1` / `stop.ps1` / `status.ps1` | manual start (detached), clean stop (kills leaked task tree), status overview |
 | `scripts/help.mjs` | `npm run help` cheat sheet |
-| `test/` | `npm test` runs nine offline scripts: `stream-test.mjs` (chunking/retry), `cd-test.mjs` (cwd override reopen), `chat-meta-test.mjs` (meta.json parse/write), `settings-test.mjs` (settings isolation), `lock-test.mjs` (instance lock), `residual-test.mjs` (errors/history removal/redaction), `shutdown-test.mjs` (abort/delivery/deadline), `rotation-test.mjs` (log rotation), `service-test.mjs` (OS dispatch/Linux service management) |
+| `test/` | `npm test` runs nine offline scripts: `stream-test.mjs` (formatting/chunking/retry), `cd-test.mjs` (cwd override reopen), `chat-meta-test.mjs` (meta.json parse/write), `settings-test.mjs` (settings isolation), `lock-test.mjs` (instance lock), `residual-test.mjs` (errors/history removal/redaction), `shutdown-test.mjs` (abort/delivery/deadline), `rotation-test.mjs` (log rotation), `service-test.mjs` (OS dispatch/Linux service management) |
 | `test/autostart-test.ps1` | separate offline Windows task-management tests, run with `npm run test:windows` |
 | `test/commands-scope.mjs` | manual online command-menu diagnostic: reads `.env` and calls Telegram; excluded from `npm test` |
 | `sessions/` | runtime data: per-chat `.jsonl` histories + `meta.json` (per-chat cwd/model/thinking) — **gitignored** |

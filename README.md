@@ -12,6 +12,11 @@
   restarts (pi's standard `.jsonl` session format, one file per chat)
 - **Live streaming replies** — tokens are pushed into an editable message as
   they're generated (~800 ms cadence), so you watch the answer arrive
+- **Formatted replies** — Markdown headings, bold/italic text, inline and fenced
+  code, links, lists, and quotes render as native Telegram formatting on iOS,
+  Android, and desktop. Formatting carries across continuation messages;
+  tables remain readable monospace text. If Telegram rejects formatting, the
+  same answer is retried as plain text.
 - **Long-output handling** — output beyond Telegram's 4096-char limit is
   automatically split into continuation messages
 - **Tool status inline** — watch the agent work: `🔧 read…` → `✅ read`
@@ -239,7 +244,7 @@ npm run selftest      # real model prompt using pi credentials (no Telegram bot 
 node test/commands-scope.mjs  # online diagnostic: reads .env and calls Telegram
 ```
 
-The `npm test` suite covers streaming/chunking/retries, `/cd` and project context,
+The `npm test` suite covers Markdown formatting/streaming/chunking/retries, `/cd` and project context,
 chat metadata, settings isolation, instance locking, errors/history removal/redaction,
 shutdown, log rotation, and OS dispatch/Linux service management. It uses mocks
 and temporary fixtures without contacting Telegram or a model provider.
@@ -257,6 +262,7 @@ history.ts           failure-aware per-chat history removal
 instance-lock.ts     atomic heartbeat-backed process lock
 session-errors.ts    terminal-vs-retry model error buffering
 telegram-stream.ts   live streaming + chunking into editable messages
+telegram-format.ts   Markdown to native Telegram text/entities + safe chunking
 scripts/rotate-logs.mjs  bounded pre-launch log rotation
 scripts/service.mjs      OS-aware lifecycle command dispatch
 scripts/linux-service.mjs  systemd user-service setup and management
