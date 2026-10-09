@@ -29,7 +29,7 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 
 - **One session per chat**, persisted as `sessions/chat-<chatid>.jsonl`
   (pi's own session format; survives restarts, resumed on next message).
-- **Per-chat working folder** (`/cd`): stored in `sessions/meta.json`, applied
+- **Per-chat working folder** (`/cwd`): stored in `sessions/meta.json`, applied
   via `SessionManager.open(file, dir, cwdOverride)` + `createAgentSession({cwd})`.
   A session file's header cwd may be older than the current chat cwd — that's
   intentional; always pass the chat cwd, never rely on the header.
@@ -41,7 +41,7 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 - **Per-chat model/thinking** (`/model`, `/thinking`): also stored in
   `sessions/meta.json` and restored in `createChatSession` (meta → env
   `PI_TELEGRAM_MODEL`/`PI_TELEGRAM_THINKING` → pi default), so they survive
-  `/cd`, `/new`, and restarts. A stored model that no longer resolves degrades
+  `/cwd`, `/new`, and restarts. A stored model that no longer resolves degrades
   to the startup default with a log line. Runtime isolation still comes from
   `chat-settings.ts` (in-memory settings layer).
 - **Streaming**: `message_update` `text_delta` events are appended to a

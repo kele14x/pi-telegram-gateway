@@ -21,11 +21,11 @@
   automatically split into continuation messages
 - **Tool status inline** — watch the agent work: `🔧 read…` → `✅ read`
 - **Photos** — send a picture and the agent sees it (as an image input)
-- **Per-chat working folder** — `/cd <folder>` switches where the agent's
-  tools operate and reloads that folder's project instructions and resources,
-  persisted across restarts
+- **Per-chat working folder** — `/cwd` shows the current folder;
+  `/cwd <folder>` switches where the agent's tools operate and reloads that
+  folder's project instructions and resources, persisted across restarts
 - **Per-chat model & thinking** — `/model anthropic/claude-opus-4-5:high`,
-  `/thinking medium`; choices are bound to the chat and survive `/cd`, `/new`,
+  `/thinking medium`; choices are bound to the chat and survive `/cwd`, `/new`,
   and gateway restarts
 - **Reuses your pi config** — same `~/.pi/agent` credentials, settings, models,
   and extensions as your terminal pi. No extra API keys.
@@ -69,8 +69,7 @@ it replies with your numeric id, and the gateway logs it too. Add it to
 | --- | --- |
 | `any text` | send to the agent (queued if it's busy) |
 | 📷 photo (+ caption) | sent as an image to the agent |
-| `/cd <folder>` | switch this chat's working folder (absolute, relative, or `~`); history is kept |
-| `/cwd` | show the current working folder |
+| `/cwd [folder]` | show or switch this chat's working folder (absolute, relative, or `~`); history is kept |
 | `/sessions` | conversation storage details (file, size, context count) |
 | `/new` | fresh conversation (keeps the working folder) |
 | `/model [name]` | show / switch model, e.g. `/model openai/gpt-5:medium` (persists per chat) |
@@ -88,7 +87,7 @@ The bot's command menu (`/` button) is synced automatically at startup via
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | – (required) | bot token |
 | `ALLOWED_TELEGRAM_IDS` | – (recommended) | comma-separated **user** ids allowed to chat; every group sender is checked individually; blocks everyone until set |
-| `PI_TELEGRAM_CWD` | launch dir | default working folder for new chats (`/cd` overrides per chat) |
+| `PI_TELEGRAM_CWD` | launch dir | default working folder for new chats (`/cwd` overrides per chat) |
 | `PI_TELEGRAM_SESSIONS_DIR` | `./sessions` | where per-chat history is stored |
 | `PI_TELEGRAM_MODEL` | session default | default model, e.g. `openai/gpt-5:medium` (pi `--model` syntax) |
 | `PI_TELEGRAM_THINKING` | session default | initial thinking level |
@@ -186,12 +185,12 @@ newest 20 archives are retained for each log type.
 
 - Every chat gets its own session: `sessions/chat-<chatid>.jsonl`
   (the same format pi uses), loaded lazily on first message and resumed on restart.
-- `/cd` keeps the same history file and re-opens it with the new folder as the
-  agent's working directory — your conversation continues where you left off.
+- `/cwd <folder>` keeps the same history file and re-opens it with the new folder
+  as the agent's working directory — your conversation continues where you left off.
   It refuses to switch while work is queued or active. Wait for completion, or
-  use `/stop` to explicitly cancel prompts before retrying `/cd`.
+  use `/stop` to explicitly cancel prompts before retrying `/cwd`.
 - Per-chat folders persist across restarts in `sessions/meta.json`; per-chat
-  model/thinking choices are stored there too, so they survive `/cd`, `/new`,
+  model/thinking choices are stored there too, so they survive `/cwd`, `/new`,
   and restarts (a stored model that no longer exists falls back to the startup
   default).
 - Project instructions (`AGENTS.md`, including applicable ancestors), settings,
@@ -244,7 +243,7 @@ npm run selftest      # real model prompt using pi credentials (no Telegram bot 
 node test/commands-scope.mjs  # online diagnostic: reads .env and calls Telegram
 ```
 
-The `npm test` suite covers Markdown formatting/streaming/chunking/retries, `/cd` and project context,
+The `npm test` suite covers Markdown formatting/streaming/chunking/retries, `/cwd` and project context,
 chat metadata, settings isolation, instance locking, errors/history removal/redaction,
 shutdown, log rotation, and OS dispatch/Linux service management. It uses mocks
 and temporary fixtures without contacting Telegram or a model provider.

@@ -222,7 +222,7 @@ async function createChatSession(chatId: number, cwd: string, sessionsDir = SESS
   const sm = SessionManager.open(sessionFile, sessionsDir, cwd);
 
   type SessionOptions = NonNullable<Parameters<typeof createAgentSession>[0]>;
-  // Per-chat preferences (bound to the chat; survive /cd, /new, and restarts)
+  // Per-chat preferences (bound to the chat; survive /cwd, /new, and restarts)
   // take priority over the PI_TELEGRAM_MODEL / PI_TELEGRAM_THINKING startup env.
   const meta = chatMeta.get(chatId);
   let cliModel = meta?.model ?? MODEL_ARG;
@@ -397,7 +397,7 @@ async function getChatSession(
     }
     if (st.session) return st.session;
     if (!st.sessionInit) {
-      // Capture the state this creation belongs to; if /new or /cd supersede
+      // Capture the state this creation belongs to; if /new or /cwd supersede
       // it while the session is being built, discard the result instead of
       // wiring a stale cwd into the live chat state.
       const initGeneration = st.generation;
@@ -405,7 +405,7 @@ async function getChatSession(
       st.sessionInit = createChatSession(chatId, cwdAtCreate)
         .then((session) => {
           if (!isCurrentChat(st, initGeneration) || st.cwd !== cwdAtCreate) {
-            log(`[chat ${chatId}] discarding superseded session (raced with /new or /cd)`);
+            log(`[chat ${chatId}] discarding superseded session (raced with /new or /cwd)`);
             session.dispose();
             return undefined;
           }
@@ -532,7 +532,7 @@ function submitPrompt(
   st.busy++;
   enqueueChatJob(st, async () => {
     try {
-      // Cancelled while still queued (e.g. /stop, /new, or /cd landed meanwhile).
+      // Cancelled while still queued (e.g. /stop, /new, or /cwd landed meanwhile).
       if (!isCurrentChat(st, gen)) {
         log(`[chat ${chatId}] dropped queued message after cancellation`);
         return;
@@ -560,7 +560,7 @@ function submitPrompt(
         await safeSend(chatId, `⚠️ ${msg}`);
         return;
       }
-      // /stop, /new, or /cd may have landed while the session was being created.
+      // /stop, /new, or /cwd may have landed while the session was being created.
       if (!isCurrentChat(st, gen)) {
         await session.abort().catch(() => {});
         return;
@@ -571,7 +571,7 @@ function submitPrompt(
           preflightResult: (accepted) => {
             // The SDK invokes this synchronously after async prompt preflight
             // and immediately before starting the agent. Throwing here closes
-            // the last cancellation gap for /stop, /new, and /cd.
+            // the last cancellation gap for /stop, /new, and /cwd.
             if (accepted && !isCurrentChat(st, gen)) throw new ChatOperationCancelled();
           },
         };
@@ -600,7 +600,7 @@ function submitPrompt(
 
 /**
  * Enqueue a non-prompt operation (e.g. /model, /thinking) behind the chat's
- * prompt chain. Stale operations are dropped after /stop, /new, or /cd.
+ * prompt chain. Stale operations are dropped after /stop, /new, or /cwd.
  */
 function enqueueChatOp(
   chatId: number,
@@ -683,13 +683,12 @@ bot.command("start", async (ctx) => {
     "👋 I'm a gateway to your pi coding agent. Send me a message (or a photo) and I'll have pi work on it.\n\n" +
       "Commands:\n" +
       "/new — start a fresh conversation (clears history)\n" +
-      "/cd <folder> — switch this chat's working folder\n" +
+      "/cwd [folder] — show or switch this chat's working folder\n" +
       "/sessions — conversation storage details for this chat\n" +
       "/model [name] — show / switch model (e.g. /model anthropic/claude-opus-4-5:high)\n" +
       "/thinking [level] — show / set thinking level (off…max)\n" +
       "/stop — abort the current run and drop queued messages\n" +
       "/status — show live agent activity\n" +
-      "/cwd — show the current working folder\n" +
       "/help — this message",
   );
 });
@@ -698,13 +697,12 @@ bot.command("help", async (ctx) => {
   await ctx.reply(
     "Just chat: send text or photos. The agent keeps a persistent conversation per chat.\n\n" +
       "/new — fresh conversation (keeps the working folder)\n" +
-      "/cd <folder> — switch this chat's working folder (absolute or relative, ~ supported)\n" +
+      "/cwd [folder] — show or switch this chat's working folder (absolute or relative, ~ supported)\n" +
       "/sessions — conversation storage details for this chat\n" +
       "/model [name] — show or switch model\n" +
       "/thinking [level] — show or set thinking level (off/minimal/low/medium/high/xhigh/max)\n" +
       "/stop — abort the current run and drop queued messages\n" +
       "/status — show live agent activity\n" +
-      "/cwd — show the current working folder\n" +
       "/help — this message",
   );
 });
@@ -867,15 +865,10 @@ bot.command("status", async (ctx) => {
 });
 
 bot.command("cwd", async (ctx) => {
-  const st = ensureChat(ctx.chat.id);
-  await ctx.reply(`📁 ${st.cwd}\n\nChange it with /cd <folder> (use /sessions for session details).`);
-});
-
-bot.command("cd", async (ctx) => {
   const raw = ctx.payload.trim();
   const st = ensureChat(ctx.chat.id);
   if (!raw) {
-    await ctx.reply(`📁 Current: ${st.cwd}\n\nUsage: /cd <path> — absolute, relative to the current folder, or ~ based.`);
+    await ctx.reply(`📁 Current: ${st.cwd}\n\nChange it with /cwd <folder> — absolute, relative to the current folder, or ~ based.\nUse /sessions for session details.`);
     return;
   }
   // A prompt reserves busy synchronously, before photo/session preflight or
@@ -883,7 +876,7 @@ bot.command("cd", async (ctx) => {
   const isBusy = () => st.busy > 0 || st.running.size > 0 ||
     !!st.sessionInit || !!st.sessionReset || !!st.session?.isStreaming;
   if (isBusy()) {
-    await ctx.reply("⏳ This chat has queued or active work — wait for it to finish, or /stop it first, then /cd.").catch(() => {});
+    await ctx.reply("⏳ This chat has queued or active work — wait for it to finish, or /stop it first, then /cwd.").catch(() => {});
     return;
   }
   const generation = st.generation;
@@ -895,14 +888,14 @@ bot.command("cd", async (ctx) => {
     await ctx.reply(`⚠️ No such directory: ${target}`).catch(() => {});
     return;
   }
-  // Directory validation yields to other updates. An older /cd must not
-  // override /new, /stop, another /cd, or cancel work accepted meanwhile.
+  // Directory validation yields to other updates. An older /cwd must not
+  // override /new, /stop, another /cwd, or cancel work accepted meanwhile.
   if (!isCurrentChat(st, generation)) {
-    await ctx.reply("⚠️ Folder change cancelled because this chat changed while checking the path. Please retry /cd.").catch(() => {});
+    await ctx.reply("⚠️ Folder change cancelled because this chat changed while checking the path. Please retry /cwd.").catch(() => {});
     return;
   }
   if (isBusy() || st.chain !== chain) {
-    await ctx.reply("⏳ Chat activity changed while checking the folder — wait for work to finish, or /stop it, then retry /cd.").catch(() => {});
+    await ctx.reply("⏳ Chat activity changed while checking the folder — wait for work to finish, or /stop it, then retry /cwd.").catch(() => {});
     return;
   }
   st.cwd = target;
@@ -939,19 +932,18 @@ bot.command("sessions", async (ctx) => {
       `Size: ${size}\n` +
       `Messages in context: ${s.messages.length}\n` +
       `History: persistent for this chat\n\n` +
-      `Use /new for a fresh conversation (keeps the working folder), /cd <folder> to change folder.`,
+      `Use /new for a fresh conversation (keeps the working folder), /cwd <folder> to change folder.`,
   );
 });
 
-const KNOWN_COMMANDS = new Set(["start", "help", "new", "cd", "sessions", "model", "thinking", "stop", "status", "cwd"]);
+const KNOWN_COMMANDS = new Set(["start", "help", "new", "cwd", "sessions", "model", "thinking", "stop", "status"]);
 
 /** Shown in the Telegram command menu ("/" button); synced at startup. */
 const BOT_COMMANDS = [
   { command: "start", description: "Welcome message and quick guide" },
   { command: "help", description: "Show available commands" },
   { command: "new", description: "Start a fresh conversation (keeps working folder)" },
-  { command: "cd", description: "Change this chat’s working folder, e.g. /cd ~/Desktop" },
-  { command: "cwd", description: "Show the current working folder" },
+  { command: "cwd", description: "Show or change working folder, e.g. /cwd ~/Desktop" },
   { command: "sessions", description: "Show conversation storage details" },
   { command: "model", description: "Show or switch model, e.g. /model anthropic/claude-opus-4-5:high" },
   { command: "thinking", description: "Show or set thinking level (off…max)" },

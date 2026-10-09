@@ -49,8 +49,7 @@ console.log("TELEGRAM BOT COMMANDS (send to @your_bot in chat):\n");
 const botCmds = [
   ["/start", "welcome message and quick guide"],
   ["/help", "show available commands"],
-  ["/cd <folder>", "switch folder and reload project instructions (keeps history)"],
-  ["/cwd", "show working folder"],
+  ["/cwd [folder]", "show / switch folder; reload project instructions (keeps history)"],
   ["/sessions", "conversation storage details for this chat"],
   ["/new", "fresh conversation (keeps folder)"],
   ["/model [name]", "show / switch model"],

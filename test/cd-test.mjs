@@ -1,4 +1,4 @@
-// Offline /cd regressions: handler races, persisted SDK history, and mocked model requests.
+// Offline /cwd regressions: handler races, persisted SDK history, and mocked model requests.
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -20,7 +20,7 @@ function deferred() {
   return {promise, resolve: resolvePromise};
 }
 
-async function testCdCommand(ast, dirA, dirB, dirEmpty) {
+async function testCwdCommand(ast, dirA, dirB, dirEmpty) {
   // Execute the actual command and queue/session lifecycle, with no bootstrap,
   // credentials, Telegram requests, or model calls. Gates control each race.
   const names = new Set([
@@ -34,9 +34,9 @@ async function testCdCommand(ast, dirA, dirB, dirEmpty) {
   const command = ast.statements.find(node =>
     ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) &&
     node.expression.expression.getText(ast) === "bot.command" &&
-    node.expression.arguments[0]?.text === "cd",
+    node.expression.arguments[0]?.text === "cwd",
   );
-  assert(declarations.length === names.size && command, "production /cd handler and lifecycle are present");
+  assert(declarations.length === names.size && command, "production /cwd handler and lifecycle are present");
   const code = ts.transpileModule([...declarations, command].map(node => node.getText(ast)).join("\n"), {
     compilerOptions: {target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None},
   }).outputText;
@@ -48,7 +48,7 @@ async function testCdCommand(ast, dirA, dirB, dirEmpty) {
     const metadata = new Map();
     const effects = {stats: 0, aborts: 0, disposals: 0, clears: 0, cancels: 0, removals: 0};
     let runPrompt = async () => {};
-    let cd;
+    let cwd;
     function makeSession(cwd) {
       const session = {
         isStreaming: false,
@@ -72,7 +72,7 @@ async function testCdCommand(ast, dirA, dirB, dirEmpty) {
       shuttingDown: false,
       AbortController, resolve, expandHome: path => path, chats: new Map(), chatMeta: metadata,
       DEFAULT_CWD: dirA, SESSIONS_DIR: dirA, log: () => {},
-      bot: {command: (name, handler) => { if (name === "cd") cd = handler; }},
+      bot: {command: (name, handler) => { if (name === "cwd") cwd = handler; }},
       stat: async () => { effects.stats++; return {isDirectory: () => true}; },
       saveChatMeta: (id, patch) => { metadata.set(id, {...metadata.get(id), ...patch}); return true; },
       removeChatHistory: () => { effects.removals++; },
@@ -84,7 +84,7 @@ async function testCdCommand(ast, dirA, dirB, dirEmpty) {
     const state = context.ensureChat(-42);
     state.session = makeSession(dirA);
     state.stream = new FakeStream();
-    const changeFolder = path => cd({chat: {id: state.chatId}, payload: path, reply: async text => { replies.push(text); }});
+    const changeFolder = path => cwd({chat: {id: state.chatId}, payload: path, reply: async text => { replies.push(text); }});
     return {context, state, replies, sent, prompts, metadata, effects, changeFolder,
       setRunPrompt: fn => { runPrompt = fn; }};
   }
@@ -98,6 +98,42 @@ async function testCdCommand(ast, dirA, dirB, dirEmpty) {
 
   {
     const gateway = makeGateway();
+    const {state, replies, effects, metadata} = gateway;
+    state.cwd = dirB;
+    state.session = null;
+    for (const payload of ["", "   "]) await gateway.changeFolder(payload);
+    assert(replies.length === 2 && replies.every(reply => reply.includes(dirB) && reply.includes("/cwd <folder>")),
+      "/cwd without a folder shows the chat's current folder and how to change it");
+    assert(state.session === null && state.cwd === dirB && state.generation === 0 &&
+      metadata.size === 0 && effects.stats === 0 && effects.aborts === 0 && effects.disposals === 0,
+    "showing the working folder needs no session or directory validation and leaves state intact");
+  }
+
+  {
+    const gateway = makeGateway();
+    const {state, replies, effects} = gateway;
+    state.busy = 1;
+    state.session.isStreaming = true;
+    await gateway.changeFolder("");
+    assert(replies[0]?.includes(dirA) && replies[0]?.includes("/cwd <folder>") && effects.stats === 0,
+      "/cwd can show the working folder while the chat is busy");
+    assertUntouched(gateway, "viewing the folder while busy leaves the active session intact");
+  }
+
+  {
+    const gateway = makeGateway();
+    const {context, state, metadata, replies} = gateway;
+    let checked;
+    context.stat = async path => { checked = path; return {isDirectory: () => true}; };
+    await gateway.changeFolder("  ../folder-b  ");
+    await state.sessionReset;
+    assert(checked === dirB && state.cwd === dirB && metadata.get(state.chatId)?.cwd === dirB &&
+      replies[0]?.includes("Working folder set to"),
+    "/cwd with a folder trims the argument, resolves it from the chat cwd, and saves the change");
+  }
+
+  {
+    const gateway = makeGateway();
     const {context, state, prompts, replies, sent, effects} = gateway;
     const queue = deferred();
     state.chain = queue.promise;
@@ -107,8 +143,8 @@ async function testCdCommand(ast, dirA, dirB, dirEmpty) {
       "queued-prompt fixture has no active streaming run");
     await gateway.changeFolder(dirB);
     assert(replies.length === 1 && replies[0].includes("queued or active work") && effects.stats === 0,
-      "/cd refuses queued prompts with feedback before validating the path");
-    assertUntouched(gateway, "refusing /cd keeps the queued prompts and old session intact");
+      "/cwd refuses queued prompts with feedback before validating the path");
+    assertUntouched(gateway, "refusing /cwd keeps the queued prompts and old session intact");
     queue.resolve();
     await state.chain;
     assert(prompts.map(prompt => prompt.text).join(",") === "first queued prompt,second queued prompt" &&
@@ -125,11 +161,11 @@ async function testCdCommand(ast, dirA, dirB, dirEmpty) {
     assert(state.running.size === 1 && !state.session.isStreaming,
       "photo-preparation fixture is active before SDK streaming starts");
     await gateway.changeFolder(dirB);
-    assertUntouched(gateway, "/cd preserves a prompt waiting for photo preparation before streaming");
+    assertUntouched(gateway, "/cwd preserves a prompt waiting for photo preparation before streaming");
     photos.resolve([]);
     await state.chain;
     assert(prompts.length === 1 && prompts[0].cwd === dirA && state.busy === 0,
-      "photo preparation completes and the prompt runs after /cd is refused");
+      "photo preparation completes and the prompt runs after /cwd is refused");
   }
 
   {
@@ -149,7 +185,7 @@ async function testCdCommand(ast, dirA, dirB, dirEmpty) {
     validation.resolve({isDirectory: () => true});
     await switching;
     assert(state.session.isStreaming && replies[0]?.includes("Chat activity changed"),
-      "/cd detects a run that starts during directory validation and reports refusal");
+      "/cwd detects a run that starts during directory validation and reports refusal");
     assertUntouched(gateway, "a validation race neither aborts the new run nor drops its queued follow-up");
     run.resolve();
     await state.chain;
@@ -163,12 +199,12 @@ async function testCdCommand(ast, dirA, dirB, dirEmpty) {
     const validation = deferred();
     context.stat = () => validation.promise;
     const switching = gateway.changeFolder(dirB);
-    // Even activity that finishes during validation must make /cd retry.
+    // Even activity that finishes during validation must make /cwd retry.
     await context.enqueueChatOp(state.chatId, async () => {});
     validation.resolve({isDirectory: () => true});
     await switching;
-    assert(replies[0]?.includes("Chat activity changed"), "/cd notices command activity completed during validation");
-    assertUntouched(gateway, "completed command activity cannot be overwritten by a stale /cd");
+    assert(replies[0]?.includes("Chat activity changed"), "/cwd notices command activity completed during validation");
+    assertUntouched(gateway, "completed command activity cannot be overwritten by a stale /cwd");
   }
 
   {
@@ -182,7 +218,7 @@ async function testCdCommand(ast, dirA, dirB, dirEmpty) {
     await switching;
     assert(state.cwd === dirA && state.generation === 1 && metadata.size === 0 && effects.aborts === 0 &&
       effects.disposals === 0 && replies[0]?.includes("Folder change cancelled"),
-    "a lifecycle generation change cancels pending /cd with feedback");
+    "a lifecycle generation change cancels pending /cwd with feedback");
   }
 
   {
@@ -200,7 +236,7 @@ async function testCdCommand(ast, dirA, dirB, dirEmpty) {
     await first;
     assert(state.cwd === dirEmpty && metadata.get(state.chatId)?.cwd === dirEmpty && state.generation === 1 &&
       replies.some(reply => reply.includes("Folder change cancelled")),
-    "an older /cd cannot overwrite a newer completed folder switch");
+    "an older /cwd cannot overwrite a newer completed folder switch");
     assert(effects.disposals === 1 && effects.removals === 0,
       "an idle folder switch replaces the session once and keeps history");
     context.submitPrompt(state.chatId, "continue in new folder");
@@ -284,8 +320,8 @@ try {
   first.dispose();
 
   const second = await create(dirB);
-  assert(second.sessionFile === file, "/cd retains the same history file");
-  assert(second.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("Remember our existing conversation")), "/cd retains prior conversation messages");
+  assert(second.sessionFile === file, "/cwd retains the same history file");
+  assert(second.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("Remember our existing conversation")), "/cwd retains prior conversation messages");
   assert(second.settingsManager.getProjectSettings().defaultThinkingLevel === "high", "project settings come from B and survive loader reload");
   assert(second.thinkingLevel === "medium", "per-chat thinking preference survives the folder switch");
   assert(second.resourceLoader.getPrompts().prompts.some(prompt => prompt.content.includes("PROJECT_B_ONLY")), "project-configured prompt resources come from B");
@@ -327,7 +363,7 @@ try {
   assert(returned.messages.filter(message => message.customType === "gateway-working-folder").length === 3, "folder boundaries persist across switches and reopening");
   assert(returned.messages.some(message => message.role === "assistant" && message.content[0]?.text === "OFFLINE_REPLY"), "assistant history survives all folder switches");
   returned.dispose();
-  await testCdCommand(ast, dirA, dirB, dirEmpty);
+  await testCwdCommand(ast, dirA, dirB, dirEmpty);
   console.log("\ncd-test passed ✅");
 } finally {
   for (const session of sessions) session.dispose();
