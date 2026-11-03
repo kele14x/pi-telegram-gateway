@@ -26,7 +26,7 @@ async function testCwdCommand(ast, dirA, dirB, dirEmpty) {
   const names = new Set([
     "ensureChat", "isCurrentChat", "advanceChatGeneration", "abortable",
     "getChatSession", "replaceChatSession", "enqueueChatJob", "submitPrompt", "enqueueChatOp",
-    "ChatOperationCancelled",
+    "recordEvent", "ChatOperationCancelled",
   ]);
   const declarations = ast.statements.filter(node =>
     (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name?.text),
@@ -69,7 +69,7 @@ async function testCwdCommand(ast, dirA, dirB, dirEmpty) {
       cancel() { effects.cancels++; }
     }
     const context = vm.createContext({
-      shuttingDown: false,
+      shuttingDown: false, events: null,
       AbortController, resolve, expandHome: path => path, chats: new Map(), chatMeta: metadata,
       DEFAULT_CWD: dirA, SESSIONS_DIR: dirA, log: () => {},
       bot: {command: (name, handler) => { if (name === "cwd") cwd = handler; }},

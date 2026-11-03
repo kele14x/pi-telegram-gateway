@@ -64,6 +64,7 @@ KEY PATHS:
   logs/gateway.log      runtime log
   logs/gateway-err.log  managed stderr log
   logs/archive/         newest 20 pre-launch archives per log type
+  logs/gateway-events.jsonl  lifecycle events for the agent (start/stop/crash/cancel)
   sessions/chat-<id>.jsonl   per-chat conversation history
   compose.podman.yaml   Podman-only Compose override (keep-id); host flags in .env
   .env                  config (bot token, allowlist) — never committed

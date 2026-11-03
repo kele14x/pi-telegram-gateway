@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createRequire } from "node:module";
 
@@ -19,6 +19,8 @@ export interface InstanceLockRecord {
 
 export interface InstanceLock {
   record: InstanceLockRecord;
+  /** Metadata left by an owner that exited without releasing (crash or forced kill). */
+  previous?: Partial<InstanceLockRecord>;
   release(): void;
 }
 
@@ -51,6 +53,17 @@ export function acquireInstanceLock(
     throw err;
   }
 
+  // A clean release removes metadata before dropping the native lock, so any
+  // metadata seen while holding the lock belongs to a dead owner.
+  let previous: Partial<InstanceLockRecord> | undefined;
+  if (existsSync(metadataFile)) {
+    try {
+      previous = JSON.parse(readFileSync(metadataFile, "utf8")) as Partial<InstanceLockRecord>;
+    } catch {
+      previous = {};
+    }
+  }
+
   const record: InstanceLockRecord = {
     pid: process.pid,
     token: randomUUID(),
@@ -68,6 +81,7 @@ export function acquireInstanceLock(
   let released = false;
   return {
     record,
+    previous,
     release() {
       if (released) return;
       released = true;

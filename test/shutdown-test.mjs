@@ -19,6 +19,7 @@ const names = new Set([
   "trackDelivery", "wireSession", "ensureChat", "isCurrentChat", "advanceChatGeneration",
   "abortable", "getChatSession", "replaceChatSession", "enqueueChatJob", "submitPrompt", "enqueueChatOp",
   "safeSend", "redactSecrets", "proxyOrigin", "log", "shutdown", "performShutdown",
+  "recordEvent", "recordCancellation", "errorText",
   "ChatOperationCancelled",
 ]);
 const declarations = ast.statements.filter(node =>
@@ -60,7 +61,7 @@ function makeGateway() {
   const context = vm.createContext({
     AbortController, URL, TelegramStream, chunkEnd, SessionErrorBuffer,
     shuttingDown: false, shutdownPromise: null, SHUTDOWN_TIMEOUT_MS: 10_000,
-    pendingDeliveries: new Set(), chats: new Map(), chatMeta: new Map(),
+    pendingDeliveries: new Set(), chats: new Map(), chatMeta: new Map(), events: null,
     DEFAULT_CWD: "synthetic-project", BOT_TOKEN: "synthetic-offline-token", PROXY_URL: undefined,
     bot, console: {log: (...args) => logs.push(args.join(" "))},
     process: {exit: status => events.push(`exit:${status}`)},
@@ -91,7 +92,7 @@ function makeGateway() {
     };
     state.session = session;
     state.stream = new TelegramStream(bot, chatId, context.log);
-    context.wireSession(chatId, session, state.stream);
+    context.wireSession(state, session, state.stream);
     return {state, session, abortStarted, emit: event => listener(event)};
   }
 
@@ -143,8 +144,16 @@ function append(chat, text) {
   context.submitPrompt(42, "queued request");
   const queuedCommand = context.enqueueChatOp(42, async () => { queuedCommandRan = true; });
   const oldSignals = chats.map(chat => chat.state.generationController.signal);
-  const shutdown = context.shutdown();
-  assert.equal(context.shutdown(), shutdown, "repeated signals share the same shutdown promise");
+  const recorded = [];
+  context.events = {record: (event, fields) => recorded.push({event, ...fields})};
+  const shutdown = context.shutdown("SIGTERM");
+  assert.equal(context.shutdown("SIGTERM"), shutdown, "repeated signals share the same shutdown promise");
+  assert.deepEqual(recorded[0], {event: "stopping", signal: "SIGTERM", activeChats: 2});
+  for (const chat of chats) {
+    const cancelled = recorded.find(entry => entry.event === "run_cancelled" && entry.chat === chat.state.chatId);
+    assert(cancelled?.reason === "shutdown" && cancelled.pendingPrompts >= 1 && cancelled.runMs >= 0,
+      "each active chat records its shutdown cancellation");
+  }
   await Promise.all(chats.map(chat => chat.abortStarted.promise));
   gateway.assertWaiting();
   assert(oldSignals.every(signal => signal.aborted), "preparation signals are cancelled for every chat");
@@ -169,6 +178,8 @@ function append(chat, text) {
   assert.equal(events.filter(event => event === "bot-stop").length, 1);
   assert.equal(events.filter(event => event === "exit:0").length, 1);
   assert.equal(timers.size, 0, "successful cleanup clears its deadline");
+  assert(!recorded.some(entry => entry.event === "run_failed" || entry.event === "shutdown_timeout"),
+    "aborted runs are not recorded as failures");
 }
 
 // agent_end finalized an old run before shutdown. A newer run also finalized,

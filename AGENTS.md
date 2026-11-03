@@ -62,6 +62,11 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
   session creation/replacement, stream finalization, and notices share a 10 s
   deadline before disposal and exit. Background finalization promises are tracked
   even when a second `finalize()` call returns early. Forced kills bypass this.
+- **Lifecycle events**: the lock owner records start/stop/exit/fatal, unclean
+  previous runs, cancelled/failed runs, setting changes, model fallbacks, and
+  history resets via `recordEvent()` into `logs/gateway-events.jsonl`
+  (`/data/logs` in containers). `CHAT_HINT` tells the agent where it is. Never
+  record message text or secrets; selftest records nothing.
 
 ## Key files
 
@@ -72,7 +77,8 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 | `chat-resources.ts` | loads resources/settings for the current chat cwd and records a context boundary when reopening retained history |
 | `chat-meta.ts` | parses/atomically writes `sessions/meta.json` (per-chat cwd + model/thinking) |
 | `history.ts` | deletes one per-chat SDK history file and deliberately propagates failure to `/new` |
-| `instance-lock.ts` | atomic, heartbeat-backed single-instance lock plus ownership metadata |
+| `instance-lock.ts` | atomic, heartbeat-backed single-instance lock plus ownership metadata; reports metadata left by a dead owner |
+| `gateway-events.ts` | bounded JSON-lines lifecycle log (`logs/gateway-events.jsonl`, ~500 entries) for the agent; redacted, metadata only, never throws |
 | `session-errors.ts` | defers assistant error rendering until `agent_end` determines whether the attempt will retry |
 | `telegram-stream.ts` | `TelegramStream`: live edits, chunking >3900 chars, ~800 ms edit throttle, 429 retry (retry-after honored, cap 30 s) |
 | `telegram-format.ts` | Markdown to native Telegram text/entities; UTF-16-safe chunking after rendering so formatting spans survive message splits |
@@ -82,7 +88,7 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 | `Dockerfile` / `docker-compose.yml` / `.dockerignore` | Node 24 slim + bash/git/curl/ripgrep/fd-find; one managed data volume for isolated pi config, history, and locks; interactive pi setup; only the workspace is host-mounted |
 | `compose.podman.yaml` | Podman-only Compose override: `userns_mode: keep-id` and private SELinux workspace label; never merge into `docker-compose.yml` |
 | `contrib/pi-telegram-gateway-podman.service` | systemd user unit template for rootless Podman Compose autostart; foreground `up`, `down` on stop |
-| `test/` | `npm test` runs nine offline scripts: `stream-test.mjs` (formatting/chunking/retry), `cd-test.mjs` (cwd override reopen), `chat-meta-test.mjs` (meta.json parse/write), `settings-test.mjs` (settings isolation), `lock-test.mjs` (instance lock), `residual-test.mjs` (errors/history removal/redaction), `shutdown-test.mjs` (abort/delivery/deadline), `rotation-test.mjs` (log rotation), `service-test.mjs` (Linux service management and container recipes) |
+| `test/` | `npm test` runs ten offline scripts: `stream-test.mjs` (formatting/chunking/retry), `cd-test.mjs` (cwd override reopen), `chat-meta-test.mjs` (meta.json parse/write), `settings-test.mjs` (settings isolation), `lock-test.mjs` (instance lock), `events-test.mjs` (lifecycle event log), `residual-test.mjs` (errors/history removal/redaction), `shutdown-test.mjs` (abort/delivery/deadline), `rotation-test.mjs` (log rotation), `service-test.mjs` (Linux service management and container recipes) |
 | `test/commands-scope.mjs` | manual online command-menu diagnostic: reads `.env` and calls Telegram; excluded from `npm test` |
 | `sessions/` | runtime data: per-chat `.jsonl` histories + `meta.json` (per-chat cwd/model/thinking) — **gitignored** |
 

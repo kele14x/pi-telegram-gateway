@@ -54,6 +54,7 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import { createChatResources, syncChatCwdContext } from "./chat-resources.ts";
 import { parseChatMeta, writeChatMeta, type ChatMetaEntry } from "./chat-meta.ts";
 import { removeChatHistory } from "./history.ts";
+import { createEventLog, type EventFields, type GatewayEventLog } from "./gateway-events.ts";
 import { acquireInstanceLock, type InstanceLock } from "./instance-lock.ts";
 import { SessionErrorBuffer } from "./session-errors.ts";
 import { TelegramStream, chunkEnd } from "./telegram-stream.ts";
@@ -77,6 +78,21 @@ function releaseLock() {
   } catch {
     /* ignore */
   }
+}
+
+// Lifecycle events for the agent itself; only the lock owner writes them.
+const EVENTS_FILE = join(LOCK_DIR, "gateway-events.jsonl");
+let events: GatewayEventLog | null = null;
+function recordEvent(event: string, fields?: EventFields) {
+  events?.record(event, fields);
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function modelName(model: { provider: string; id: string } | undefined): string | undefined {
+  return model ? `${model.provider}/${model.id}` : undefined;
 }
 
 // ══════════════════════════════ Config ═══════════════════════════════════
@@ -109,6 +125,7 @@ const CHAT_HINT = [
   "You have your normal coding-agent capabilities (read/write files, shell, etc.) in the chat's working folder.",
   "The user talks to you in a chat; they may also send photos.",
   "Respond conversationally: keep replies focused and reasonably short, summarize large outputs instead of dumping raw content, and use Markdown (``` fences) for code snippets.",
+  `Gateway lifecycle events (starts, stops, crashes, cancelled or failed runs, setting changes, history resets) are appended as JSON lines to ${EVENTS_FILE}. Read its recent lines when asked about restarts, interruptions, or missing replies; it holds metadata only, not conversation text.`,
 ];
 
 // Per-chat state persisted across restarts and session replacements:
@@ -171,6 +188,8 @@ interface ChatState {
   running: Set<Promise<void>>;
   /** Prompt jobs reserved in the chain (drives the immediate "queued" ack). */
   busy: number;
+  /** Start of the current agent run, kept across automatic retries. */
+  runStartedAt: number | null;
 }
 
 class ChatOperationCancelled extends Error {
@@ -235,6 +254,7 @@ async function createChatSession(chatId: number, cwd: string, sessionsDir = SESS
       // A stored per-chat model can outlive its catalog entry; degrade to the
       // startup default instead of blocking the chat.
       log(`[chat ${chatId}] stored model "${meta.model}" no longer resolves (${r.error}); using startup default`);
+      recordEvent("model_fallback", { chat: chatId, stored: meta.model, error: r.error, using: MODEL_ARG ?? "pi default" });
       cliModel = MODEL_ARG;
       if (cliModel) r = resolveCliModel({ cliModel, modelRuntime });
     }
@@ -268,12 +288,17 @@ async function createChatSession(chatId: number, cwd: string, sessionsDir = SESS
   return session;
 }
 
-function wireSession(chatId: number, session: AgentSession, stream: TelegramStream) {
+function wireSession(st: ChatState, session: AgentSession, stream: TelegramStream) {
+  const chatId = st.chatId;
   const errors = new SessionErrorBuffer();
+  let retries = 0;
+  let aborted = false;
   session.subscribe((event: AgentSessionEvent) => {
     switch (event.type) {
       case "agent_start": {
         errors.beginAttempt();
+        aborted = false;
+        st.runStartedAt ??= Date.now();
         stream.reset();
         stream.setStatus("⏳ thinking…");
         break;
@@ -290,6 +315,7 @@ function wireSession(chatId: number, session: AgentSession, stream: TelegramStre
       case "message_end": {
         errors.capture(event.message);
         if ((event.message as { stopReason?: string }).stopReason === "aborted") {
+          aborted = true;
           stream.setStatus("🛑 aborted");
         }
         break;
@@ -305,19 +331,35 @@ function wireSession(chatId: number, session: AgentSession, stream: TelegramStre
       case "agent_end": {
         const terminalError = errors.finishAttempt(event.willRetry);
         if (!event.willRetry) {
+          if (terminalError && !aborted) {
+            recordEvent("run_failed", {
+              chat: chatId,
+              stage: "model",
+              error: terminalError,
+              retries,
+              runMs: st.runStartedAt === null ? undefined : Date.now() - st.runStartedAt,
+            });
+          }
+          retries = 0;
+          st.runStartedAt = null;
           if (terminalError) stream.append(`\n\n⚠️ ${terminalError}`);
           void trackDelivery(stream.finalize().catch(async (err) => {
             log(`[chat ${chatId}] final response delivery failed: ${String((err as Error)?.message ?? err)}`);
             await safeSend(chatId, "⚠️ The final response could not be delivered after several retries.");
           }));
         }
-        else stream.setStatus("⏳ retrying…");
+        else {
+          retries++;
+          stream.setStatus("⏳ retrying…");
+        }
         break;
       }
       case "auto_retry_end": {
         // If /stop cancels the SDK during its retry backoff, there is no later
         // agent_end event. Finalize the status-only stream in that narrow case.
         if (!event.success && event.finalError === "Retry cancelled") {
+          retries = 0;
+          st.runStartedAt = null;
           stream.setStatus("🛑 aborted");
           void trackDelivery(stream.finalize().catch((err) => {
             log(`[chat ${chatId}] aborted response delivery failed: ${String((err as Error)?.message ?? err)}`);
@@ -348,6 +390,7 @@ function ensureChat(chatId: number): ChatState {
       sessionReset: null,
       running: new Set(),
       busy: 0,
+      runStartedAt: null,
     };
     chats.set(chatId, st);
   }
@@ -362,6 +405,17 @@ function advanceChatGeneration(st: ChatState) {
   st.generationController.abort();
   st.generation++;
   st.generationController = new AbortController();
+}
+
+/** Record that active or queued prompts are being dropped; call before aborting. */
+function recordCancellation(st: ChatState, reason: "stop" | "new" | "shutdown") {
+  if (st.busy === 0 && !st.session?.isStreaming) return;
+  recordEvent("run_cancelled", {
+    chat: st.chatId,
+    reason,
+    pendingPrompts: st.busy,
+    runMs: st.runStartedAt === null ? undefined : Date.now() - st.runStartedAt,
+  });
 }
 
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -411,7 +465,7 @@ async function getChatSession(
           }
           st.session = session;
           st.stream = new TelegramStream(bot, chatId, log);
-          wireSession(chatId, session, st.stream);
+          wireSession(st, session, st.stream);
           const m = session.model;
           log(
             `[chat ${chatId}] session ready — model: ${m ? `${m.provider}/${m.id}` : "default"}, cwd: ${st.cwd}, file: ${session.sessionFile}`,
@@ -541,6 +595,7 @@ function submitPrompt(
       if (!loaded.ok) {
         const msg = loaded.error instanceof Error ? loaded.error.message : String(loaded.error);
         log(`[chat ${chatId}] photo preparation failed: ${msg}`);
+        recordEvent("run_failed", { chat: chatId, stage: "photo", error: msg });
         if (isCurrentChat(st, gen)) await safeSend(chatId, `⚠️ Couldn't process the photo: ${msg}`);
         return;
       }
@@ -557,6 +612,7 @@ function submitPrompt(
         // the user instead of vanishing into bot.catch().
         const msg = err instanceof Error ? err.message : String(err);
         log(`[chat ${chatId}] session creation failed: ${msg}`);
+        recordEvent("run_failed", { chat: chatId, stage: "session", error: msg });
         await safeSend(chatId, `⚠️ ${msg}`);
         return;
       }
@@ -587,6 +643,7 @@ function submitPrompt(
         }
         const msg = err instanceof Error ? err.message : String(err);
         log(`[chat ${chatId}] prompt error: ${msg}`);
+        recordEvent("run_failed", { chat: chatId, stage: "prompt", error: msg });
         await safeSend(chatId, `⚠️ ${msg}`);
       }
     } finally {
@@ -713,16 +770,21 @@ bot.command("new", async (ctx) => {
   if (st) {
     // Invalidate old jobs synchronously, then replace the session in the
     // background. New jobs on this state wait for sessionReset to finish.
+    recordCancellation(st, "new");
     advanceChatGeneration(st);
     st.session?.clearQueue();
     void replaceChatSession(st, true).then(
-      () => ctx.reply("🧹 Fresh session started (working folder kept). Send me anything to begin.").catch(() => {}),
+      () => {
+        recordEvent("history_reset", { chat: chatId });
+        return ctx.reply("🧹 Fresh session started (working folder kept). Send me anything to begin.").catch(() => {});
+      },
       (err) => {
         // Drop messages submitted after /new but before its failed deletion was
         // discovered; they must not silently resume the retained history.
         advanceChatGeneration(st);
         st.session?.clearQueue();
         log(`[new] history removal failed: ${String((err as Error)?.message ?? err)}`);
+        recordEvent("history_reset_failed", { chat: chatId, error: errorText(err) });
         return ctx.reply("⚠️ Couldn't clear the saved conversation. Its history was kept; please check the gateway log and try again.").catch(() => {});
       },
     );
@@ -733,9 +795,11 @@ bot.command("new", async (ctx) => {
       removeChatHistory(SESSIONS_DIR, chatId);
     } catch (err) {
       log(`[new] history removal failed: ${String((err as Error)?.message ?? err)}`);
+      recordEvent("history_reset_failed", { chat: chatId, error: errorText(err) });
       await ctx.reply("⚠️ Couldn't clear the saved conversation. Its history was kept; please check the gateway log and try again.").catch(() => {});
       return;
     }
+    recordEvent("history_reset", { chat: chatId });
     await ctx.reply("🧹 Fresh session started (working folder kept). Send me anything to begin.");
   }
 });
@@ -757,9 +821,13 @@ bot.command("model", async (ctx) => {
         return;
       }
       if (arg === "cycle") {
+        const before = modelName(session.model);
         const r = await session.cycleModel();
         const m = session.model;
-        if (m) saveChatMeta(ctx.chat.id, { model: `${m.provider}/${m.id}` });
+        if (m) {
+          const persisted = saveChatMeta(ctx.chat.id, { model: `${m.provider}/${m.id}` });
+          if (r) recordEvent("settings_changed", { chat: ctx.chat.id, setting: "model", from: before, to: modelName(m), persisted });
+        }
         await ctx.reply(`🔄 ${r ? "Cycled" : "No models to cycle through"} — now: ${m ? `${m.provider}/${m.id}` : "?"}`);
         return;
       }
@@ -769,11 +837,17 @@ bot.command("model", async (ctx) => {
         return;
       }
       if (!isCurrentChat(st, generation)) return;
+      const beforeModel = modelName(session.model);
+      const beforeThinking = session.thinkingLevel;
       await session.setModel(r.model);
       if (r.thinkingLevel) await session.setThinkingLevel(r.thinkingLevel);
       const patch: Partial<ChatMetaEntry> = { model: `${r.model.provider}/${r.model.id}` };
       if (r.thinkingLevel) patch.thinking = r.thinkingLevel;
       const persisted = saveChatMeta(ctx.chat.id, patch);
+      recordEvent("settings_changed", { chat: ctx.chat.id, setting: "model", from: beforeModel, to: patch.model, persisted });
+      if (r.thinkingLevel) {
+        recordEvent("settings_changed", { chat: ctx.chat.id, setting: "thinking", from: beforeThinking, to: r.thinkingLevel, persisted });
+      }
       if (isCurrentChat(st, generation)) {
         await ctx.reply(
           `✓ Model set to ${r.model.provider}/${r.model.id}` +
@@ -803,8 +877,12 @@ bot.command("thinking", async (ctx) => {
         return;
       }
       if (arg === "cycle") {
+        const before = session.thinkingLevel;
         const level = session.cycleThinkingLevel();
-        if (level) saveChatMeta(ctx.chat.id, { thinking: level });
+        if (level) {
+          const persisted = saveChatMeta(ctx.chat.id, { thinking: level });
+          recordEvent("settings_changed", { chat: ctx.chat.id, setting: "thinking", from: before, to: level, persisted });
+        }
         await ctx.reply(`🔄 thinking level: ${level}`);
         return;
       }
@@ -813,8 +891,10 @@ bot.command("thinking", async (ctx) => {
         return;
       }
       if (!isCurrentChat(st, generation)) return;
+      const before = session.thinkingLevel;
       session.setThinkingLevel(arg as (typeof THINKING_LEVELS)[number]);
       const persisted = saveChatMeta(ctx.chat.id, { thinking: arg });
+      recordEvent("settings_changed", { chat: ctx.chat.id, setting: "thinking", from: before, to: arg, persisted });
       if (isCurrentChat(st, generation)) {
         await ctx.reply(
           `✓ thinking level: ${arg}` +
@@ -838,6 +918,7 @@ bot.command("stop", async (ctx) => {
   // Cancel-all semantics: bump the generation so queued st.chain submissions
   // are dropped too (the SDK queue is cleared separately — it would otherwise
   // drain via continue() after the abort).
+  recordCancellation(st, "stop");
   advanceChatGeneration(st);
   const session = st.session;
   session?.clearQueue();
@@ -898,8 +979,10 @@ bot.command("cwd", async (ctx) => {
     await ctx.reply("⏳ Chat activity changed while checking the folder — wait for work to finish, or /stop it, then retry /cwd.").catch(() => {});
     return;
   }
+  const previousCwd = st.cwd;
   st.cwd = target;
   const persisted = saveChatMeta(ctx.chat.id, { cwd: target });
+  recordEvent("settings_changed", { chat: ctx.chat.id, setting: "cwd", from: previousCwd, to: target, persisted });
   // Invalidate other directory validations before replacing the idle session.
   // New jobs use this generation and wait for sessionReset before reopening.
   advanceChatGeneration(st);
@@ -1116,7 +1199,20 @@ async function main() {
     console.error("Another gateway instance is already running. Exiting.");
     process.exit(0);
   }
-  if (!isSelftest) process.once("exit", releaseLock);
+  if (!isSelftest) {
+    events = createEventLog(EVENTS_FILE, {
+      redact: redactSecrets,
+      onError: (err) => log(`[events] write failed: ${errorText(err)}`),
+    });
+    recordEvent("start", { pid: process.pid, node: process.version, defaultCwd: DEFAULT_CWD, model: MODEL_ARG });
+    const previous = instanceLock?.previous;
+    if (previous) recordEvent("previous_run_unclean", { pid: previous.pid, startedAt: previous.startedAt });
+    process.on("uncaughtExceptionMonitor", (err, origin) => recordEvent("fatal", { origin, error: errorText(err) }));
+    process.once("exit", (code) => {
+      recordEvent("exit", { code });
+      releaseLock();
+    });
+  }
   mkdirSync(SESSIONS_DIR, { recursive: true });
   loadChatMeta();
 
@@ -1212,22 +1308,27 @@ async function main() {
   } catch (err) {
     if (shuttingDown) return;
     log(`FATAL: bot launch failed after retries: ${String((err as Error)?.message ?? err)}`);
+    recordEvent("fatal", { origin: "bot launch", error: errorText(err) });
     process.exit(1);
   }
   log("bot stopped.");
 }
 
-function shutdown(): Promise<void> {
+function shutdown(signal: NodeJS.Signals): Promise<void> {
   if (shutdownPromise) return shutdownPromise;
   // Close ingress synchronously, including SDK preflight that is already
   // awaiting resources. Repeated signals share the same cleanup and deadline.
   shuttingDown = true;
-  shutdownPromise = performShutdown();
+  shutdownPromise = performShutdown(signal);
   return shutdownPromise;
 }
 
-async function performShutdown() {
+async function performShutdown(signal: NodeJS.Signals) {
   log("shutting down…");
+  const states = [...chats.values()];
+  const activeStates = states.filter((st) => st.busy > 0 || st.session?.isStreaming);
+  recordEvent("stopping", { signal, activeChats: activeStates.length });
+  for (const st of activeStates) recordCancellation(st, "shutdown");
   let timedOut = false;
   let timeout!: ReturnType<typeof setTimeout>;
   const deadline = new Promise<void>((resolveDeadline) => {
@@ -1241,7 +1342,6 @@ async function performShutdown() {
   } catch {
     /* ignore */
   }
-  const states = [...chats.values()];
   // Cancel every generation before any asynchronous cleanup can yield. SDK
   // aborts run concurrently so one stalled session cannot delay the others.
   for (const st of states) advanceChatGeneration(st);
@@ -1277,7 +1377,10 @@ async function performShutdown() {
   } finally {
     clearTimeout(timeout);
   }
-  if (timedOut) log(`[shutdown] cleanup timed out after ${SHUTDOWN_TIMEOUT_MS}ms; exiting with unfinished work or delivery`);
+  if (timedOut) {
+    log(`[shutdown] cleanup timed out after ${SHUTDOWN_TIMEOUT_MS}ms; exiting with unfinished work or delivery`);
+    recordEvent("shutdown_timeout", { ms: SHUTDOWN_TIMEOUT_MS });
+  }
   for (const st of states) {
     st.stream?.cancel();
     try {
@@ -1289,11 +1392,12 @@ async function performShutdown() {
   process.exit(0);
 }
 
-process.once("SIGINT", () => void shutdown());
-process.once("SIGTERM", () => void shutdown());
+process.once("SIGINT", () => void shutdown("SIGINT"));
+process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
 main().catch((err) => {
   if (shuttingDown) return;
   log(`FATAL: ${String((err as Error)?.message ?? err)}`);
+  recordEvent("fatal", { origin: "startup", error: errorText(err) });
   process.exit(1);
 });

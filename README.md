@@ -119,6 +119,16 @@ The gateway holds an atomic, heartbeat-backed single-instance lock
 (`logs/gateway.instance.lock`, with owner metadata in `logs/gateway.lock`) so
 a manual `npm start` cannot run a second, conflicting poller in the same checkout.
 
+The lock owner also appends lifecycle events to `logs/gateway-events.jsonl`, one
+JSON object per line, keeping roughly the newest 500: `start`, `stopping`
+(signal), `exit` (code), `fatal`, `shutdown_timeout`, `previous_run_unclean`
+(the last run crashed or was killed), `run_cancelled` (`/stop`, `/new`, or
+shutdown), `run_failed` (model, prompt, session, or photo errors), `settings_changed`
+(`/cwd`, `/model`, `/thinking`), `model_fallback`, and `history_reset`.
+Entries carry Telegram chat ids but never message text; known secrets are
+redacted. The agent's system prompt names this file so it can explain restarts
+or interrupted work.
+
 On `SIGINT` (Ctrl+C) or `SIGTERM`, the gateway cancels queued work, requests
 abort from all sessions concurrently, and waits for current jobs and pending
 Telegram replies for up to **10 seconds total** before disposing sessions and
@@ -175,7 +185,8 @@ Inside the data volume:
 - `/data/pi-agent`: API keys/OAuth tokens, settings, custom models, extensions,
   and Linux helper binaries. OAuth refreshes can update credentials here.
 - `/data/sessions`: Telegram chat history and per-chat preferences (`meta.json`).
-- `/data/logs`: instance locks; `/app/logs` points here so all gateway containers
+- `/data/logs`: instance locks and the lifecycle event log
+  (`gateway-events.jsonl`); `/app/logs` points here so all gateway containers
   sharing the volume use the same lock.
 
 Notes:
