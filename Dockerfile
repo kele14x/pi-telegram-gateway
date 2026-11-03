@@ -7,9 +7,11 @@ RUN apt-get update \
   && git config --system safe.directory '*'
 
 WORKDIR /app
-COPY package.json package-lock.json ./
+# --chmod: host checkout permissions must not decide whether the non-root
+# container user can read the sources (e.g. umask 077 checkouts).
+COPY --chmod=0644 package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
-COPY *.ts ./
+COPY --chmod=0644 *.ts ./
 
 # New volumes inherit these permissions so any configured host uid can initialize them.
 RUN mkdir -p /data/pi-agent/bin /data/sessions /data/logs /workspace \
