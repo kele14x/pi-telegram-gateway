@@ -1,6 +1,6 @@
 <p align="center">
   <h1 align="center">pi-telegram-gateway</h1>
-  <p align="center">Chat with a <a href="https://github.com/arendil-works/pi-coding-agent">pi coding agent</a> from Telegram — same agent, same tools, through a chat.</p>
+  <p align="center">Chat with a <a href="https://github.com/earendil-works/pi/tree/main/packages/coding-agent">pi coding agent</a> from Telegram — same agent, same tools, through a chat.</p>
 </p>
 
 > A chat gateway: your own full-coding-agent
@@ -135,38 +135,62 @@ and requires an existing service registered with `npm run autostart:setup`.
 
 ## 🐳 Docker
 
-The gateway can also run in a container. The agent then works only inside
-the container, which acts as a sandbox. Its shell and file tools see only the
-mounted folders. The image includes a minimal tool set: `bash`, `git`, `curl`,
+The gateway can also run in a container with its own pi configuration and
+credentials, independent of the host's `~/.pi/agent`. No host pi installation
+is required. The image includes a minimal tool set: `bash`, `git`, `curl`,
 `ripgrep`, and `fd`. Add anything else your projects need to the `Dockerfile`.
 
 ```bash
 cp .env.example .env        # set TELEGRAM_BOT_TOKEN and ALLOWED_TELEGRAM_IDS
+docker compose run --rm --build pi-setup
 docker compose up -d --build
 docker compose logs -f      # gateway output
 docker compose down         # graceful stop (SIGTERM, 15 s grace period)
 ```
 
-`docker-compose.yml` mounts:
+The setup command opens the bundled pi CLI inside Docker. Run `/login` to
+configure an API key or OAuth login, then `/model` and press Ctrl+S to save a
+default. Exit with `/quit` before starting the gateway. OAuth may require opening
+a link in your host browser and pasting the result back into the CLI. Run setup
+again whenever you need to change credentials or defaults; it does not start the
+Telegram gateway or mount your host workspace. Custom endpoints can be configured
+in `/data/pi-agent/models.json`; their addresses must be reachable from Docker.
 
-| Host | Container | Purpose |
+Compose mounts only your selected host workspace plus one Docker-managed volume:
+
+| Mount | Container | Purpose |
 | --- | --- | --- |
-| `PI_AGENT_DIR` (default `~/.pi/agent`) | `/pi-agent` | pi auth/settings/models; read-write so OAuth tokens can refresh |
-| `PI_WORKSPACE` (default `./workspace`) | `/workspace` | default working folder for new chats |
-| volume `sessions` | `/app/sessions` | per-chat history and `meta.json` |
-| volume `pi-agent-bin` | `/pi-agent/bin` | Linux tool binaries, shadowing host ones built for another OS |
+| `PI_WORKSPACE` (default `./workspace`) | `/workspace` | default working folder for new chats; read-write |
+| volume `data` | `/data` | persistent pi configuration, Telegram history, and instance locks |
+
+Inside the data volume:
+
+- `/data/pi-agent`: API keys/OAuth tokens, settings, custom models, extensions,
+  and Linux helper binaries. OAuth refreshes can update credentials here.
+- `/data/sessions`: Telegram chat history and per-chat preferences (`meta.json`).
+- `/data/logs`: instance locks; `/app/logs` points here so all gateway containers
+  sharing the volume use the same lock.
 
 Notes:
 
+- Keep `.env` in the repository root. Compose reads it, but does not mount it.
+  After editing it, run `docker compose up -d`; a plain restart does not reload it.
 - Compose overrides `PI_TELEGRAM_CWD`, `PI_TELEGRAM_SESSIONS_DIR`, and
-  `PI_CODING_AGENT_DIR` with container paths, so host paths in `.env` are harmless.
-  `/cwd` accepts only container paths, such as `/workspace/my-project`.
+  `PI_CODING_AGENT_DIR` with container paths. `/cwd` accepts only container paths,
+  such as `/workspace/my-project`.
 - On Linux, set `PUID`/`PGID` in `.env` to your host user's ids (`id -u` / `id -g`)
-  so files the agent creates in the workspace are owned by you.
-- Container history is separate from a host `sessions/` folder. Don't run a
-  host `npm start` and the container with the same bot token at the same time.
-- pi extensions in your pi config folder that depend on host binaries or absolute
-  host paths may not work inside the container.
+  before first setup so files the agent creates in the workspace are owned by you.
+  Keep the same ids for setup and gateway runs to retain access to saved credentials.
+- `docker compose down` preserves the volume. **`docker compose down -v` deletes
+  both credentials and conversation history.** Treat volume backups as secrets.
+- Previous host pi configuration and separate Docker session/bin volumes are not
+  imported or deleted. Authenticate separately; retain old volumes if you need
+  to migrate history. `PI_AGENT_DIR` is no longer used by Compose.
+- Don't run a host `npm start` and the container with the same bot token at the
+  same time. Direct host operation still uses your host pi configuration.
+- The agent can access its credentials and mounted workspace; Docker isolation
+  does not protect these from the agent. Prefer dedicated provider credentials
+  with appropriate spending limits, and mount only folders you intend to expose.
 - Logs go to stdout (`docker compose logs`). The systemd `npm run *:daemon`
   and `autostart:*` commands don't apply. Compose's `restart: unless-stopped`
   handles crash recovery and restarts the container when Docker starts.
@@ -305,7 +329,7 @@ sessions/            per-chat session files (gitignored)
 
 ## 🙏 Credits
 
-- Built on the [pi coding agent SDK](https://github.com/arendil-works/pi-coding-agent)
+- Built on the [pi coding agent SDK](https://github.com/earendil-works/pi/tree/main/packages/coding-agent)
 
 ## 📄 License
 
