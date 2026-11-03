@@ -11,15 +11,16 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY *.ts ./
 
-# World-writable so the container can run as any host uid (PUID/PGID).
-RUN mkdir -p /app/sessions /app/logs /pi-agent/bin /workspace \
-  && chmod 1777 /app/sessions /app/logs /pi-agent /pi-agent/bin /workspace /home/node
+# New volumes inherit these permissions so any configured host uid can initialize them.
+RUN mkdir -p /data/pi-agent/bin /data/sessions /data/logs /workspace \
+  && chmod 1777 /data /data/pi-agent /data/pi-agent/bin /data/sessions /data/logs /workspace /home/node \
+  && ln -s /data/logs /app/logs
 
 ENV NODE_ENV=production \
   HOME=/home/node \
-  PI_CODING_AGENT_DIR=/pi-agent \
+  PI_CODING_AGENT_DIR=/data/pi-agent \
   PI_TELEGRAM_CWD=/workspace \
-  PI_TELEGRAM_SESSIONS_DIR=/app/sessions
+  PI_TELEGRAM_SESSIONS_DIR=/data/sessions
 
 USER node
 STOPSIGNAL SIGTERM

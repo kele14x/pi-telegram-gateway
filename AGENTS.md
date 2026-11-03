@@ -11,8 +11,8 @@ and streams replies into editable Telegram messages. Built on the
 
 - [telegraf](https://github.com/telegraf/telegraf).
 
-It is NOT a terminal UI and NOT an LLM provider — it reuses the owner's pi
-config (`~/.pi/agent` auth/settings/models/extensions) as-is.
+It is NOT a terminal UI and NOT an LLM provider. Direct host operation reuses
+`~/.pi/agent`; Docker uses isolated pi configuration in its managed data volume.
 
 ## How it works (data flow)
 
@@ -79,7 +79,7 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 | `scripts/rotate-logs.mjs` | archives non-empty logs before managed launches and retains 20 archives per log type |
 | `scripts/linux-service.mjs` | safely installs/removes a per-user systemd unit; login startup, crash recovery, child-process cleanup, no embedded credentials |
 | `scripts/help.mjs` | `npm run help` cheat sheet |
-| `Dockerfile` / `docker-compose.yml` / `.dockerignore` | container image (Node 24 slim + bash/git/curl/ripgrep/fd) and Compose deployment; pi config, workspace, and sessions are mounted, never baked in |
+| `Dockerfile` / `docker-compose.yml` / `.dockerignore` | Node 24 slim + bash/git/curl/ripgrep/fd; one managed data volume for isolated pi config, history, and locks; interactive pi setup; only the workspace is host-mounted |
 | `test/` | `npm test` runs nine offline scripts: `stream-test.mjs` (formatting/chunking/retry), `cd-test.mjs` (cwd override reopen), `chat-meta-test.mjs` (meta.json parse/write), `settings-test.mjs` (settings isolation), `lock-test.mjs` (instance lock), `residual-test.mjs` (errors/history removal/redaction), `shutdown-test.mjs` (abort/delivery/deadline), `rotation-test.mjs` (log rotation), `service-test.mjs` (Linux service management) |
 | `test/commands-scope.mjs` | manual online command-menu diagnostic: reads `.env` and calls Telegram; excluded from `npm test` |
 | `sessions/` | runtime data: per-chat `.jsonl` histories + `meta.json` (per-chat cwd/model/thinking) — **gitignored** |
@@ -126,7 +126,7 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 | `PI_TELEGRAM_APPEND_PROMPT` | extra system-prompt instructions |
 | `TELEGRAM_PROXY` / `HTTPS_PROXY` | optional proxy for Telegram API |
 
-Model credentials come from `~/.pi/agent/` — never embed keys in code.
+Model credentials come from host `~/.pi/agent/` or Docker `/data/pi-agent/` — never embed keys in code.
 
 ## Development workflow
 
@@ -155,13 +155,16 @@ Model credentials come from `~/.pi/agent/` — never embed keys in code.
 - Managed daemon commands support Linux only. Foreground operation remains
   available through `npm start` on other platforms; Windows task scripts and
   their tests have been removed.
-- **Docker:** `docker compose up -d --build`. The image must never contain
-  `.env`, `sessions/`, or pi credentials (`.dockerignore` excludes them; pi
-  config is bind-mounted at `/pi-agent` via `PI_CODING_AGENT_DIR`). Compose
-  forces container paths for cwd/sessions/agent dir and shadows
-  `/pi-agent/bin` with a volume, because the SDK prefers `<agentDir>/bin`
-  over `PATH` and host binaries may be for another OS. Keep the 15 s
-  `stop_grace_period` above the gateway's 10 s shutdown deadline.
+- **Docker:** first `docker compose run --rm --build pi-setup` for `/login` and
+  `/model`, then `docker compose up -d --build`. Setup uses the bundled pi CLI
+  and runs only on demand (the `setup` profile); no host pi install is needed.
+  Both services share one `data` volume at `/data`: pi config in `/data/pi-agent`,
+  Telegram history in `/data/sessions`, locks in `/data/logs` via `/app/logs`.
+  Only the gateway mounts the selected host workspace. Never mount host pi
+  config or bake credentials, `.env`, or history into the image. Compose
+  forces container cwd/sessions/agent-dir paths. `down` keeps data; `down -v`
+  destroys credentials and history. Keep setup/gateway PUID/PGID consistent
+  and the 15 s stop grace period above the gateway's 10 s shutdown deadline.
 - `git pull` from upstream is fine but review diffs — the gateway holds
   shell access to the machine (public repo; supply-chain caution).
 

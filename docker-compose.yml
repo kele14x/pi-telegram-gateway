@@ -9,16 +9,28 @@ services:
     env_file: .env
     # Container paths override any host paths set in .env.
     environment:
-      PI_CODING_AGENT_DIR: /pi-agent
+      PI_CODING_AGENT_DIR: /data/pi-agent
       PI_TELEGRAM_CWD: /workspace
-      PI_TELEGRAM_SESSIONS_DIR: /app/sessions
+      PI_TELEGRAM_SESSIONS_DIR: /data/sessions
     volumes:
-      - ${PI_AGENT_DIR:-${HOME}/.pi/agent}:/pi-agent
-      # Shadows host-downloaded rg/fd binaries, which may be built for another OS.
-      - pi-agent-bin:/pi-agent/bin
-      - sessions:/app/sessions
+      - data:/data
       - ${PI_WORKSPACE:-./workspace}:/workspace
 
+  pi-setup:
+    build: .
+    image: pi-telegram-gateway
+    profiles: [setup]
+    init: true
+    user: "${PUID:-1000}:${PGID:-1000}"
+    stdin_open: true
+    tty: true
+    working_dir: /workspace
+    environment:
+      PI_CODING_AGENT_DIR: /data/pi-agent
+      TERM: xterm-256color
+    command: ["/app/node_modules/.bin/pi"]
+    volumes:
+      - data:/data
+
 volumes:
-  pi-agent-bin:
-  sessions:
+  data:
