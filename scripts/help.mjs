@@ -40,7 +40,7 @@ if (process.platform === "linux") console.log(`
   A foreground npm start is stopped with Ctrl+C.
 
   Containerized alternative (rootless Podman):
-    podman-compose --in-pod=false -f docker-compose.yml -f compose.podman.yaml ...
+    podman-compose --in-pod=false -p pi-telegram-gateway -f docker-compose.yml -f compose.podman.yaml ...
     Unit: ~/.config/systemd/user/pi-telegram-gateway-podman.service
     Docs: README section "Podman"`);
 else console.log("\n  Managed daemon commands require Linux with systemd; use npm start on this OS.");

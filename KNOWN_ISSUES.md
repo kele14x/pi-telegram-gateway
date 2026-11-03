@@ -1,6 +1,6 @@
 # Known issues
 
-Open issues: **12** — P0: **0**, P1: **1**, P2: **11**.
+Open issues: **13** — P0: **0**, P1: **2**, P2: **11**.
 
 Issue IDs are retained from earlier reviews and stay unchanged when resolved.
 
@@ -19,6 +19,19 @@ Issues that lose user work, break core features, or disrupt normal operation.
   and disrupt replies to the owner. The access guard itself still holds.
   **Where:** `index.ts` (allowlist middleware).
   **Fix:** Apply a cooldown per sender/chat, or reply only to an explicit `/start`.
+
+- **#28 — SDK preflight cancellation can permanently wedge a chat.** With pi SDK
+  1.5.0, `/stop` or `/new` during asynchronous prompt preflight can make the
+  cancellation callback throw after the SDK marks the session busy. Callback
+  failure does not restore idle state: subsequent prompts queue without running,
+  and `/new` cannot recover because session replacement waits indefinitely for
+  `abort()`. Restarting the gateway is the current workaround.
+  **Where:** `index.ts` (`submitPrompt` preflight callback, `replaceChatSession`);
+  pi SDK 1.5.0 (`AgentSession._startRun`).
+  **Fix (deferred):** Ensure callback failures restore SDK idle state, or use a
+  verified unaffected SDK version. Preserve the cancellation guard and add a
+  real-SDK preflight-cancellation regression; fake-session shutdown tests do not
+  cover this failure.
 
 ## P2 — Improvements
 

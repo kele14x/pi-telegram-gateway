@@ -80,9 +80,9 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 | `scripts/linux-service.mjs` | safely installs/removes a per-user systemd unit; login startup, crash recovery, child-process cleanup, no embedded credentials |
 | `scripts/help.mjs` | `npm run help` cheat sheet |
 | `Dockerfile` / `docker-compose.yml` / `.dockerignore` | Node 24 slim + bash/git/curl/ripgrep/fd-find; one managed data volume for isolated pi config, history, and locks; interactive pi setup; only the workspace is host-mounted |
-| `compose.podman.yaml` | Podman-only Compose override: `userns_mode: keep-id` and IPv4-only networking; never merge into `docker-compose.yml` |
+| `compose.podman.yaml` | Podman-only Compose override: `userns_mode: keep-id` and private SELinux workspace label; never merge into `docker-compose.yml` |
 | `contrib/pi-telegram-gateway-podman.service` | systemd user unit template for rootless Podman Compose autostart; foreground `up`, `down` on stop |
-| `test/` | `npm test` runs nine offline scripts: `stream-test.mjs` (formatting/chunking/retry), `cd-test.mjs` (cwd override reopen), `chat-meta-test.mjs` (meta.json parse/write), `settings-test.mjs` (settings isolation), `lock-test.mjs` (instance lock), `residual-test.mjs` (errors/history removal/redaction), `shutdown-test.mjs` (abort/delivery/deadline), `rotation-test.mjs` (log rotation), `service-test.mjs` (Linux service management) |
+| `test/` | `npm test` runs nine offline scripts: `stream-test.mjs` (formatting/chunking/retry), `cd-test.mjs` (cwd override reopen), `chat-meta-test.mjs` (meta.json parse/write), `settings-test.mjs` (settings isolation), `lock-test.mjs` (instance lock), `residual-test.mjs` (errors/history removal/redaction), `shutdown-test.mjs` (abort/delivery/deadline), `rotation-test.mjs` (log rotation), `service-test.mjs` (Linux service management and container recipes) |
 | `test/commands-scope.mjs` | manual online command-menu diagnostic: reads `.env` and calls Telegram; excluded from `npm test` |
 | `sessions/` | runtime data: per-chat `.jsonl` histories + `meta.json` (per-chat cwd/model/thinking) — **gitignored** |
 
@@ -169,18 +169,22 @@ Podman `/data/pi-agent/` — never embed keys in code.
   and runs only on demand (the `setup` profile); no host pi install is needed.
   Both services share one `data` volume at `/data`: pi config in `/data/pi-agent`,
   Telegram history in `/data/sessions`, locks in `/data/logs` via `/app/logs`.
-  Only the gateway mounts the selected host workspace. Never mount host pi
-  config or bake credentials, `.env`, or history into the image. Compose
-  forces container cwd/sessions/agent-dir paths. `down` keeps data; `down -v`
-  destroys credentials and history. Keep setup/gateway PUID/PGID consistent
+  Only the gateway mounts the selected host workspace. Setup receives configured
+  HTTP_PROXY/HTTPS_PROXY/NO_PROXY without the bot token. Never mount host pi
+  config into the Compose services or bake credentials, `.env`, or history into
+  the image. Compose forces container cwd/sessions/agent-dir paths. `down` keeps
+  data; `down -v` destroys credentials and history. Keep setup/gateway PUID/PGID consistent
   and the 15 s stop grace period above the gateway's 10 s shutdown deadline.
   The Dockerfile copies sources with `COPY --chmod=0644`, so a checkout with
   restrictive modes (e.g. `0600`) does not break the non-root container user.
 - **Rootless Podman:** install `podman-compose` separately (Podman is a native
-  package, not Python). Use `podman-compose --in-pod=false -f docker-compose.yml
-  -f compose.podman.yaml ...`; `userns_mode: keep-id` is required for a writable
-  host workspace. Set `PI_TELEGRAM_IPV4_ONLY=true` in `.env` only on hosts with
-  broken IPv6; do not force it in the shared override. Autostart uses the
+  package, not Python). Use `podman-compose --in-pod=false -p pi-telegram-gateway
+  -f docker-compose.yml -f compose.podman.yaml ...` consistently with the user unit
+  and credential import volume. Match PUID/PGID to the host ids for `keep-id`.
+  The Podman override privately relabels only the workspace with `:Z`; the
+  one-shot credential import disables SELinux separation to avoid relabelling
+  host pi configuration. Set `PI_TELEGRAM_IPV4_ONLY=true` in `.env` only on hosts
+  with broken IPv6; do not force it in the shared override. Autostart uses the
   `contrib/...service` systemd user template; manage it with `systemctl --user`.
   A manual `podman-compose down` while the unit is active is restarted by systemd.
 - `git pull` from upstream is fine but review diffs — the gateway holds

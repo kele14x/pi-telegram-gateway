@@ -49,7 +49,7 @@ export function renderMarkdown(source: string): FormattedText {
           if (block.tokens) {
             render(block.tokens, depth);
             trailingLines(token);
-          } else append(block.text);
+          } else append(block.raw);
           break;
         }
         case "heading":

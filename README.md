@@ -157,6 +157,11 @@ a link in your host browser and pasting the result back into the CLI. Run setup
 again whenever you need to change credentials or defaults; it does not start the
 Telegram gateway or mount your host workspace. Custom endpoints can be configured
 in `/data/pi-agent/models.json`; their addresses must be reachable from Docker.
+Setup receives `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` from the shell or `.env`,
+without receiving the bot token. `TELEGRAM_PROXY` remains Telegram-only. Proxy
+addresses must be reachable inside the container; `127.0.0.1` is not the host.
+Leave unused proxy variables unset, rather than blank or valueless in `.env`;
+Podman Compose forwards those declarations instead of using saved pi defaults.
 
 Compose mounts only your selected host workspace plus one Docker-managed volume:
 
@@ -242,8 +247,12 @@ The image and Compose stack also run under rootless Podman. Podman is a native
 package (not Python); `podman-compose` is a separate Python provider. Keep
 Podman-only settings in `compose.podman.yaml`, not in `docker-compose.yml`:
 
-- `userns_mode: keep-id` makes the bind-mounted workspace writable for the
-  container user under rootless Podman.
+- Set `PUID`/`PGID` in `.env` to `id -u` / `id -g` before setup or credential
+  import. `userns_mode: keep-id` preserves those host ids, but does not override
+  Compose's explicit container user.
+- The workspace bind mount uses `:Z` for a private SELinux label. Mount only a
+  dedicated workspace: this relabels that folder and is not suitable for a
+  folder shared with other containers requiring a different SELinux label.
 - On hosts with broken IPv6, set `PI_TELEGRAM_IPV4_ONLY=true` in `.env`
   (node-fetch v2 has no happy-eyeballs). The tracked override does not force it.
 - `--in-pod=false` is required because `podman-compose` otherwise creates a pod,
@@ -268,24 +277,33 @@ Manual start/stop:
 ```bash
 export PATH="$HOME/.local/venvs/podman-compose/bin:$PATH"
 mkdir -p workspace
-podman-compose --in-pod=false -f docker-compose.yml -f compose.podman.yaml up -d gateway
-podman-compose --in-pod=false -f docker-compose.yml -f compose.podman.yaml logs -f gateway
-podman-compose --in-pod=false -f docker-compose.yml -f compose.podman.yaml down
+podman-compose --in-pod=false -p pi-telegram-gateway -f docker-compose.yml -f compose.podman.yaml up -d gateway
+podman-compose --in-pod=false -p pi-telegram-gateway -f docker-compose.yml -f compose.podman.yaml logs -f gateway
+podman-compose --in-pod=false -p pi-telegram-gateway -f docker-compose.yml -f compose.podman.yaml down
 ```
+
+All Podman commands and the user unit use the explicit project name
+`pi-telegram-gateway`, regardless of the checkout folder or `COMPOSE_PROJECT_NAME`.
+If you previously used another project name, retain its old volumes until you
+have migrated credentials and history; do not run both stacks with the same bot.
 
 The `data` volume layout is the same as Docker. Docker and Podman use separate
 volume stores, so seeding one does not seed the other. To copy host credentials
-into the Podman volume:
+into the Podman volume, the one-shot import container disables SELinux separation
+for its read-only host mount rather than relabelling your host pi configuration:
 
 ```bash
-podman run --rm --userns=keep-id \
+podman run --rm --userns=keep-id --security-opt label=disable \
   -v pi-telegram-gateway_data:/data \
   -v "$HOME/.pi/agent:/host:ro" \
-  pi-telegram-gateway:latest sh -c '
+  pi-telegram-gateway:latest sh -ec '
+    umask 077
     for f in auth.json settings.json models-store.json models.json; do
-      [ -f "/host/$f" ] && cp -p "/host/$f" /data/pi-agent/
+      if [ -f "/host/$f" ]; then
+        cp "/host/$f" /data/pi-agent/
+        chmod 600 "/data/pi-agent/$f"
+      fi
     done
-    chmod 600 /data/pi-agent/*.json 2>/dev/null || true
   '
 ```
 
@@ -294,16 +312,20 @@ podman run --rm --userns=keep-id \
 Render the tracked template and enable it:
 
 ```bash
-# apt install: COMPOSE_BIN="$(command -v podman-compose)"
-COMPOSE_BIN="${PODMAN_COMPOSE:-$HOME/.local/venvs/podman-compose/bin/podman-compose}"
-mkdir -p ~/.config/systemd/user
-sed -e "s|@PROJECT_DIR@|$PWD|g" \
-    -e "s|@COMPOSE_BIN@|$COMPOSE_BIN|g" \
-    -e "s|@COMPOSE_DIR@|$(dirname "$COMPOSE_BIN")|g" \
-    contrib/pi-telegram-gateway-podman.service \
-  > ~/.config/systemd/user/pi-telegram-gateway-podman.service
-systemctl --user daemon-reload
-systemctl --user enable --now pi-telegram-gateway-podman.service
+COMPOSE_BIN="${COMPOSE_BIN:-${PODMAN_COMPOSE:-$(command -v podman-compose || true)}}"
+COMPOSE_BIN="${COMPOSE_BIN:-$HOME/.local/venvs/podman-compose/bin/podman-compose}"
+if [ -x "$COMPOSE_BIN" ]; then
+  mkdir -p ~/.config/systemd/user &&
+  sed -e "s|@PROJECT_DIR@|$PWD|g" \
+      -e "s|@COMPOSE_BIN@|$COMPOSE_BIN|g" \
+      -e "s|@COMPOSE_DIR@|$(dirname "$COMPOSE_BIN")|g" \
+      contrib/pi-telegram-gateway-podman.service \
+    > ~/.config/systemd/user/pi-telegram-gateway-podman.service &&
+  systemctl --user daemon-reload &&
+  systemctl --user enable --now pi-telegram-gateway-podman.service
+else
+  printf '%s\n' 'Set COMPOSE_BIN or PODMAN_COMPOSE to an installed executable.' >&2
+fi
 ```
 
 The unit runs `podman-compose up` in the foreground (not `up -d` + `podman wait`,

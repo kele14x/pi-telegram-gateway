@@ -28,6 +28,9 @@ services:
     environment:
       PI_CODING_AGENT_DIR: /data/pi-agent
       TERM: xterm-256color
+      HTTP_PROXY:
+      HTTPS_PROXY:
+      NO_PROXY:
     command: ["/app/node_modules/.bin/pi"]
     volumes:
       - data:/data

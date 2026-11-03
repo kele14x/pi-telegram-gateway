@@ -562,6 +562,67 @@ function assert(cond, label) {
   assert(calls.delete.length === 1, "only the continuation that actually posted is deleted");
 }
 
+{
+  console.log("X) literal character references across formatting and streaming boundaries");
+  const emoji = "\u{1F600}";
+  for (const source of ["AT&T &#65;", "AT&amp;T &#65;", "&#x1F600; &lt; &unknown;"]) {
+    const result = renderMarkdown(source);
+    assert(result.text === source && result.entities.length === 0, `${JSON.stringify(source)} stays literal in ordinary text`);
+  }
+
+  const bold = "AT&amp;T &#65; " + emoji;
+  const italic = "&#x1F600; &amp; " + emoji;
+  const label = "&#65; &amp; " + emoji;
+  const url = "https://example.com/?q=AT&amp;T&n=&#65;";
+  const styled = renderMarkdown(`${emoji} **${bold}** *${italic}* [${label}](${url})`);
+  const expectedText = `${emoji} ${bold} ${italic} ${label}`;
+  const expectedEntities = [
+    { type: "bold", offset: emoji.length + 1, length: bold.length },
+    { type: "italic", offset: emoji.length + bold.length + 2, length: italic.length },
+    { type: "text_link", offset: emoji.length + bold.length + italic.length + 3, length: label.length, url },
+  ];
+  assert(styled.text === expectedText, "bold, italic, and link labels preserve literal references and emoji");
+  assert(JSON.stringify(styled.entities) === JSON.stringify(expectedEntities) && validEntities(styled), "styled labels have exact UTF-16 offsets and lengths; the link URL stays unchanged");
+
+  const literal = "AT&amp;T &#65; " + emoji;
+  const inlineCode = renderMarkdown("`" + literal + "`");
+  const fencedCode = renderMarkdown("```text\n" + literal + "\n```");
+  assert(inlineCode.text === literal && JSON.stringify(inlineCode.entities) === JSON.stringify([
+    { type: "code", offset: 0, length: literal.length },
+  ]), "inline code keeps literal references and code text");
+  assert(fencedCode.text === literal && JSON.stringify(fencedCode.entities) === JSON.stringify([
+    { type: "pre", offset: 0, length: literal.length, language: "text" },
+  ]), "fenced code keeps literal references and code text");
+  const html = '<b title="AT&amp;T">&#65; ' + emoji + "</b>";
+  const rawHtml = renderMarkdown(html);
+  assert(rawHtml.text === html && rawHtml.entities.length === 0, "raw HTML and its references remain literal text");
+  const escaped = renderMarkdown("\\*AT&T &#65;\\*");
+  assert(escaped.text === "*AT&T &#65;*" && escaped.entities.length === 0, "Markdown escape tokens still remove backslashes without decoding references");
+
+  for (const reference of ["&#65;", "&amp;"]) {
+    const prefix = "x".repeat(3897) + " ";
+    const body = reference + " AT&T " + emoji;
+    const { bot, calls, formatted, finalState } = makeMockBot();
+    const s = new TelegramStream(bot, 77);
+    const partial = prefix + "**" + reference.slice(0, 3);
+    s.append(partial);
+    await waitFor(() => calls.send.length >= 2);
+    assert(finalState() === partial, `${reference}: a partial reference remains literal while streaming`);
+    s.append(reference.slice(3) + " AT&T " + emoji + "**");
+    await s.finalize();
+    const expected = {
+      text: prefix + body,
+      entities: [{ type: "bold", offset: prefix.length, length: body.length }],
+    };
+    const chunks = splitFormatted(expected, 3900);
+    const delivered = [...formatted.values()].map(({ text, entities }) => ({ text, entities }));
+    assert(finalState() === expected.text, `${reference}: completing the reference and bold delimiters preserves all text`);
+    assert(chunks[0].text.endsWith(reference.slice(0, 2)) && chunks[1].text.startsWith(reference.slice(2)), `${reference}: literal reference text crosses the 3900-unit chunk boundary`);
+    assert(JSON.stringify(delivered) === JSON.stringify(chunks), `${reference}: final chunks have exact text and clipped bold entities`);
+    assert([...calls.send, ...calls.edit].every(validEntities), `${reference}: every streaming payload has valid UTF-16 text and entities`);
+  }
+}
+
 if (failures === 0) {
   console.log("\nAll stream tests passed ✅");
 } else {
