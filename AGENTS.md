@@ -79,7 +79,9 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 | `scripts/rotate-logs.mjs` | archives non-empty logs before managed launches and retains 20 archives per log type |
 | `scripts/linux-service.mjs` | safely installs/removes a per-user systemd unit; login startup, crash recovery, child-process cleanup, no embedded credentials |
 | `scripts/help.mjs` | `npm run help` cheat sheet |
-| `Dockerfile` / `docker-compose.yml` / `.dockerignore` | Node 24 slim + bash/git/curl/ripgrep/fd; one managed data volume for isolated pi config, history, and locks; interactive pi setup; only the workspace is host-mounted |
+| `Dockerfile` / `docker-compose.yml` / `.dockerignore` | Node 24 slim + bash/git/curl/ripgrep/fd-find; one managed data volume for isolated pi config, history, and locks; interactive pi setup; only the workspace is host-mounted |
+| `compose.podman.yaml` | Podman-only Compose override: `userns_mode: keep-id` and IPv4-only networking; never merge into `docker-compose.yml` |
+| `contrib/pi-telegram-gateway-podman.service` | systemd user unit template for rootless Podman Compose autostart; foreground `up`, `down` on stop |
 | `test/` | `npm test` runs nine offline scripts: `stream-test.mjs` (formatting/chunking/retry), `cd-test.mjs` (cwd override reopen), `chat-meta-test.mjs` (meta.json parse/write), `settings-test.mjs` (settings isolation), `lock-test.mjs` (instance lock), `residual-test.mjs` (errors/history removal/redaction), `shutdown-test.mjs` (abort/delivery/deadline), `rotation-test.mjs` (log rotation), `service-test.mjs` (Linux service management) |
 | `test/commands-scope.mjs` | manual online command-menu diagnostic: reads `.env` and calls Telegram; excluded from `npm test` |
 | `sessions/` | runtime data: per-chat `.jsonl` histories + `meta.json` (per-chat cwd/model/thinking) — **gitignored** |
@@ -112,6 +114,12 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
    `createAgentSession`), don't hand-edit `.jsonl` session files.
 8. **Never push to the remote automatically.** Commit locally, run the full
    validation, and push ONLY when the user explicitly asks.
+9. **Keep Podman-only settings out of Docker.** `userns_mode: keep-id` and
+   `--in-pod=false` belong in `compose.podman.yaml` / Podman commands, never in
+   `docker-compose.yml`. The user unit in
+   `contrib/pi-telegram-gateway-podman.service` must run `podman-compose up` in
+   the foreground: `up -d` + `podman wait` can be killed by systemd cgroup
+   cleanup.
 
 ## Configuration (.env)
 
@@ -126,7 +134,8 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 | `PI_TELEGRAM_APPEND_PROMPT` | extra system-prompt instructions |
 | `TELEGRAM_PROXY` / `HTTPS_PROXY` | optional proxy for Telegram API |
 
-Model credentials come from host `~/.pi/agent/` or Docker `/data/pi-agent/` — never embed keys in code.
+Model credentials come from host `~/.pi/agent/`, Docker `/data/pi-agent/`, or
+Podman `/data/pi-agent/` — never embed keys in code.
 
 ## Development workflow
 
@@ -165,6 +174,15 @@ Model credentials come from host `~/.pi/agent/` or Docker `/data/pi-agent/` — 
   forces container cwd/sessions/agent-dir paths. `down` keeps data; `down -v`
   destroys credentials and history. Keep setup/gateway PUID/PGID consistent
   and the 15 s stop grace period above the gateway's 10 s shutdown deadline.
+  The Dockerfile copies sources with `COPY --chmod=0644`, so a checkout with
+  restrictive modes (e.g. `0600`) does not break the non-root container user.
+- **Rootless Podman:** install `podman-compose` separately (Podman is a native
+  package, not Python). Use `podman-compose --in-pod=false -f docker-compose.yml
+  -f compose.podman.yaml ...`; `userns_mode: keep-id` is required for a writable
+  host workspace. Set `PI_TELEGRAM_IPV4_ONLY=true` in `.env` only on hosts with
+  broken IPv6; do not force it in the shared override. Autostart uses the
+  `contrib/...service` systemd user template; manage it with `systemctl --user`.
+  A manual `podman-compose down` while the unit is active is restarted by systemd.
 - `git pull` from upstream is fine but review diffs — the gateway holds
   shell access to the machine (public repo; supply-chain caution).
 

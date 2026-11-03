@@ -138,10 +138,12 @@ and requires an existing service registered with `npm run autostart:setup`.
 The gateway can also run in a container with its own pi configuration and
 credentials, independent of the host's `~/.pi/agent`. No host pi installation
 is required. The image includes a minimal tool set: `bash`, `git`, `curl`,
-`ripgrep`, and `fd`. Add anything else your projects need to the `Dockerfile`.
+`ripgrep`, and `fd-find` (`fdfind`). Add anything else your projects need to the
+`Dockerfile`.
 
 ```bash
 cp .env.example .env        # set TELEGRAM_BOT_TOKEN and ALLOWED_TELEGRAM_IDS
+mkdir -p workspace          # or point PI_WORKSPACE at an existing writable folder
 docker compose run --rm --build pi-setup
 docker compose up -d --build
 docker compose logs -f      # gateway output
@@ -181,6 +183,12 @@ Notes:
 - On Linux, set `PUID`/`PGID` in `.env` to your host user's ids (`id -u` / `id -g`)
   before first setup so files the agent creates in the workspace are owned by you.
   Keep the same ids for setup and gateway runs to retain access to saved credentials.
+- Create the workspace folder before the first `up` (or set `PI_WORKSPACE` to an
+  existing folder). If Docker has to create a missing bind-mount source, it
+  creates it as `root`, and the container user cannot write to it.
+- The Dockerfile copies sources and package files with `COPY --chmod=0644`, so a
+  checkout with restrictive permissions (for example `0600`) is still readable
+  by the non-root container user.
 - `docker compose down` preserves the volume. **`docker compose down -v` deletes
   both credentials and conversation history.** Treat volume backups as secrets.
 - Previous host pi configuration and separate Docker session/bin volumes are not
@@ -227,6 +235,89 @@ User services normally run while your login session is active. To keep the bot
 running after logout and start it at boot, optionally enable lingering with
 `loginctl enable-linger "$USER"` (your system may require administrator
 authorization). See [systemd user lingering](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html#enable-linger%20%5BUSER%E2%80%A6%5D).
+
+## 🦭 Podman
+
+The image and Compose stack also run under rootless Podman. Podman is a native
+package (not Python); `podman-compose` is a separate Python provider. Keep
+Podman-only settings in `compose.podman.yaml`, not in `docker-compose.yml`:
+
+- `userns_mode: keep-id` makes the bind-mounted workspace writable for the
+  container user under rootless Podman.
+- On hosts with broken IPv6, set `PI_TELEGRAM_IPV4_ONLY=true` in `.env`
+  (node-fetch v2 has no happy-eyeballs). The tracked override does not force it.
+- `--in-pod=false` is required because `podman-compose` otherwise creates a pod,
+  and `userns_mode` cannot be combined with a pod.
+
+Install the provider (Podman itself must already be installed):
+
+```bash
+# Distro package:
+sudo apt install podman-compose
+
+# Or the latest release in an isolated venv:
+python3 -m venv ~/.local/venvs/podman-compose
+~/.local/venvs/podman-compose/bin/pip install podman-compose
+```
+
+Add the venv's `bin` directory to `PATH`, or use the full path in the commands
+below.
+
+Manual start/stop:
+
+```bash
+export PATH="$HOME/.local/venvs/podman-compose/bin:$PATH"
+mkdir -p workspace
+podman-compose --in-pod=false -f docker-compose.yml -f compose.podman.yaml up -d gateway
+podman-compose --in-pod=false -f docker-compose.yml -f compose.podman.yaml logs -f gateway
+podman-compose --in-pod=false -f docker-compose.yml -f compose.podman.yaml down
+```
+
+The `data` volume layout is the same as Docker. Docker and Podman use separate
+volume stores, so seeding one does not seed the other. To copy host credentials
+into the Podman volume:
+
+```bash
+podman run --rm --userns=keep-id \
+  -v pi-telegram-gateway_data:/data \
+  -v "$HOME/.pi/agent:/host:ro" \
+  pi-telegram-gateway:latest sh -c '
+    for f in auth.json settings.json models-store.json models.json; do
+      [ -f "/host/$f" ] && cp -p "/host/$f" /data/pi-agent/
+    done
+    chmod 600 /data/pi-agent/*.json 2>/dev/null || true
+  '
+```
+
+### Podman autostart (systemd user service)
+
+Render the tracked template and enable it:
+
+```bash
+# apt install: COMPOSE_BIN="$(command -v podman-compose)"
+COMPOSE_BIN="${PODMAN_COMPOSE:-$HOME/.local/venvs/podman-compose/bin/podman-compose}"
+mkdir -p ~/.config/systemd/user
+sed -e "s|@PROJECT_DIR@|$PWD|g" \
+    -e "s|@COMPOSE_BIN@|$COMPOSE_BIN|g" \
+    -e "s|@COMPOSE_DIR@|$(dirname "$COMPOSE_BIN")|g" \
+    contrib/pi-telegram-gateway-podman.service \
+  > ~/.config/systemd/user/pi-telegram-gateway-podman.service
+systemctl --user daemon-reload
+systemctl --user enable --now pi-telegram-gateway-podman.service
+```
+
+The unit runs `podman-compose up` in the foreground (not `up -d` + `podman wait`,
+which systemd's cgroup cleanup can kill) and `down` on stop. `Restart=always`
+restarts the stack after a crash. Manage it with `systemctl --user`; running
+`podman-compose down` manually while the unit is active will be restarted by
+systemd. Enable lingering for boot startup after logout:
+
+```bash
+loginctl enable-linger "$USER"
+```
+
+Do not run the host `npm run *:daemon`/autostart service and the Podman unit at
+the same time: both would poll the same bot token.
 
 ## 🗃️ Sessions & working folders
 

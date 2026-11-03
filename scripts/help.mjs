@@ -37,7 +37,12 @@ if (process.platform === "linux") console.log(`
         or $XDG_CONFIG_HOME/systemd/user/pi-telegram-gateway.service
   Setup registers the service; npm run start:daemon starts it now.
   npm run restart:daemon applies code/config changes; active work is cancelled.
-  A foreground npm start is stopped with Ctrl+C.`);
+  A foreground npm start is stopped with Ctrl+C.
+
+  Containerized alternative (rootless Podman):
+    podman-compose --in-pod=false -f docker-compose.yml -f compose.podman.yaml ...
+    Unit: ~/.config/systemd/user/pi-telegram-gateway-podman.service
+    Docs: README section "Podman"`);
 else console.log("\n  Managed daemon commands require Linux with systemd; use npm start on this OS.");
 
 console.log("TELEGRAM BOT COMMANDS (send to @your_bot in chat):\n");
@@ -60,6 +65,7 @@ KEY PATHS:
   logs/gateway-err.log  managed stderr log
   logs/archive/         newest 20 pre-launch archives per log type
   sessions/chat-<id>.jsonl   per-chat conversation history
+  compose.podman.yaml   Podman-only Compose override (keep-id); host flags in .env
   .env                  config (bot token, allowlist) — never committed
 
 DOCS: https://github.com/kele14x/pi-telegram-gateway

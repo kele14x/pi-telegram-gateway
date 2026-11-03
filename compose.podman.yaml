@@ -1,0 +1,13 @@
+# Podman-specific override. Do not merge this into docker-compose.yml:
+# userns_mode=keep-id is not a Docker-compatible setting.
+#
+# Host-specific values (for example PI_TELEGRAM_IPV4_ONLY=true on networks with
+# broken IPv6) belong in .env, not in this shared override.
+#
+# Usage:
+#   podman-compose --in-pod=false -f docker-compose.yml -f compose.podman.yaml up -d gateway
+services:
+  gateway:
+    userns_mode: keep-id
+  pi-setup:
+    userns_mode: keep-id
