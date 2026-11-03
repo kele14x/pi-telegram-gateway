@@ -1,5 +1,7 @@
 .codex/
-.env/
+.env
+.env.*
+!.env.example
 logs/
 node_modules/
 sessions/
