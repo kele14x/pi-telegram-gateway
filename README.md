@@ -133,6 +133,44 @@ that is currently stopped. Active work and queued prompts are cancelled;
 saved chat history is retained. Restart leaves autostart settings unchanged
 and requires an existing service registered with `npm run autostart:setup`.
 
+## 🐳 Docker
+
+The gateway can also run in a container. The agent then works only inside
+the container, which acts as a sandbox. Its shell and file tools see only the
+mounted folders. The image includes a minimal tool set: `bash`, `git`, `curl`,
+`ripgrep`, and `fd`. Add anything else your projects need to the `Dockerfile`.
+
+```bash
+cp .env.example .env        # set TELEGRAM_BOT_TOKEN and ALLOWED_TELEGRAM_IDS
+docker compose up -d --build
+docker compose logs -f      # gateway output
+docker compose down         # graceful stop (SIGTERM, 15 s grace period)
+```
+
+`docker-compose.yml` mounts:
+
+| Host | Container | Purpose |
+| --- | --- | --- |
+| `PI_AGENT_DIR` (default `~/.pi/agent`) | `/pi-agent` | pi auth/settings/models; read-write so OAuth tokens can refresh |
+| `PI_WORKSPACE` (default `./workspace`) | `/workspace` | default working folder for new chats |
+| volume `sessions` | `/app/sessions` | per-chat history and `meta.json` |
+| volume `pi-agent-bin` | `/pi-agent/bin` | Linux tool binaries, shadowing host ones built for another OS |
+
+Notes:
+
+- Compose overrides `PI_TELEGRAM_CWD`, `PI_TELEGRAM_SESSIONS_DIR`, and
+  `PI_CODING_AGENT_DIR` with container paths, so host paths in `.env` are harmless.
+  `/cwd` accepts only container paths, such as `/workspace/my-project`.
+- On Linux, set `PUID`/`PGID` in `.env` to your host user's ids (`id -u` / `id -g`)
+  so files the agent creates in the workspace are owned by you.
+- Container history is separate from a host `sessions/` folder. Don't run a
+  host `npm start` and the container with the same bot token at the same time.
+- pi extensions in your pi config folder that depend on host binaries or absolute
+  host paths may not work inside the container.
+- Logs go to stdout (`docker compose logs`). The systemd `npm run *:daemon`
+  and `autostart:*` commands don't apply. Compose's `restart: unless-stopped`
+  handles crash recovery and restarts the container when Docker starts.
+
 ### Service setup
 
 Run `npm run autostart:setup` as your normal user, without `sudo`. It writes
@@ -248,6 +286,7 @@ telegram-stream.ts   live streaming + chunking into editable messages
 telegram-format.ts   Markdown to native Telegram text/entities + safe chunking
 scripts/rotate-logs.mjs  bounded pre-launch log rotation
 scripts/linux-service.mjs  systemd user-service setup and management
+Dockerfile, docker-compose.yml  container image and Compose deployment
 test/                offline regressions, online command-menu diagnostic
 sessions/            per-chat session files (gitignored)
 ```

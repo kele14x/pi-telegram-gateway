@@ -79,6 +79,7 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 | `scripts/rotate-logs.mjs` | archives non-empty logs before managed launches and retains 20 archives per log type |
 | `scripts/linux-service.mjs` | safely installs/removes a per-user systemd unit; login startup, crash recovery, child-process cleanup, no embedded credentials |
 | `scripts/help.mjs` | `npm run help` cheat sheet |
+| `Dockerfile` / `docker-compose.yml` / `.dockerignore` | container image (Node 24 slim + bash/git/curl/ripgrep/fd) and Compose deployment; pi config, workspace, and sessions are mounted, never baked in |
 | `test/` | `npm test` runs nine offline scripts: `stream-test.mjs` (formatting/chunking/retry), `cd-test.mjs` (cwd override reopen), `chat-meta-test.mjs` (meta.json parse/write), `settings-test.mjs` (settings isolation), `lock-test.mjs` (instance lock), `residual-test.mjs` (errors/history removal/redaction), `shutdown-test.mjs` (abort/delivery/deadline), `rotation-test.mjs` (log rotation), `service-test.mjs` (Linux service management) |
 | `test/commands-scope.mjs` | manual online command-menu diagnostic: reads `.env` and calls Telegram; excluded from `npm test` |
 | `sessions/` | runtime data: per-chat `.jsonl` histories + `meta.json` (per-chat cwd/model/thinking) — **gitignored** |
@@ -154,6 +155,13 @@ Model credentials come from `~/.pi/agent/` — never embed keys in code.
 - Managed daemon commands support Linux only. Foreground operation remains
   available through `npm start` on other platforms; Windows task scripts and
   their tests have been removed.
+- **Docker:** `docker compose up -d --build`. The image must never contain
+  `.env`, `sessions/`, or pi credentials (`.dockerignore` excludes them; pi
+  config is bind-mounted at `/pi-agent` via `PI_CODING_AGENT_DIR`). Compose
+  forces container paths for cwd/sessions/agent dir and shadows
+  `/pi-agent/bin` with a volume, because the SDK prefers `<agentDir>/bin`
+  over `PATH` and host binaries may be for another OS. Keep the 15 s
+  `stop_grace_period` above the gateway's 10 s shutdown deadline.
 - `git pull` from upstream is fine but review diffs — the gateway holds
   shell access to the machine (public repo; supply-chain caution).
 

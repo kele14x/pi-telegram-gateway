@@ -1,0 +1,10 @@
+.env
+.env.*
+.git
+.codex
+node_modules
+sessions
+logs
+workspace
+test
+*.md

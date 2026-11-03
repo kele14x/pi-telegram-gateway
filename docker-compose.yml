@@ -1,0 +1,24 @@
+services:
+  gateway:
+    build: .
+    image: pi-telegram-gateway
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 15s
+    user: "${PUID:-1000}:${PGID:-1000}"
+    env_file: .env
+    # Container paths override any host paths set in .env.
+    environment:
+      PI_CODING_AGENT_DIR: /pi-agent
+      PI_TELEGRAM_CWD: /workspace
+      PI_TELEGRAM_SESSIONS_DIR: /app/sessions
+    volumes:
+      - ${PI_AGENT_DIR:-${HOME}/.pi/agent}:/pi-agent
+      # Shadows host-downloaded rg/fd binaries, which may be built for another OS.
+      - pi-agent-bin:/pi-agent/bin
+      - sessions:/app/sessions
+      - ${PI_WORKSPACE:-./workspace}:/workspace
+
+volumes:
+  pi-agent-bin:
+  sessions:

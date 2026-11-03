@@ -3,5 +3,6 @@
 logs/
 node_modules/
 sessions/
+workspace/
 
 *.log
