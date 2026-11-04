@@ -1,4 +1,4 @@
-FROM node:24-slim AS node-runtime
+FROM node:26-slim AS node-runtime
 FROM ubuntu:26.04
 
 # safe.directory: bind-mounted workspaces may be owned by a different uid than the container user.

@@ -5,7 +5,7 @@
   "description": "Talk to a pi coding agent from Telegram (chat gateway)",
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=26"
   },
   "scripts": {
     "start": "node --env-file-if-exists=.env index.ts",
@@ -29,7 +29,7 @@
     "telegraf": "^4.16.3"
   },
   "devDependencies": {
-    "@types/node": "^24.19.1",
+    "@types/node": "^26.6.6",
     "typescript": "^6.0.3"
   }
 }

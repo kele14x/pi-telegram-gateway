@@ -336,7 +336,7 @@ export function startAgentWorker(factory: (command: CreateSessionCommand) => Pro
       result => send({ type: "reply", id: message.id, ...result }),
       error => send({ type: "reply", id: message.id, error: { name: error?.name ?? "Error", message: String(error?.message ?? error) } }),
     ).then(() => {
-      if (message.command.method === "shutdown") { process.disconnect(); process.exit(0); }
+      if (message.command.method === "shutdown") { process.disconnect?.(); process.exit(0); }
     }).catch(() => {});
   });
   const exit = () => {

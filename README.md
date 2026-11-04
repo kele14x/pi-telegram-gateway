@@ -35,7 +35,7 @@
 
 ## 🧰 Requirements
 
-- Node.js ≥ 24 (runs TypeScript natively, no build step)
+- Node.js 26 LTS or newer (runs TypeScript natively, no build step)
 - Linux with a systemd user manager for managed background operation;
   foreground operation uses `npm start`
 - A pi install with a configured model key in `~/.pi/agent/auth.json`
@@ -147,7 +147,7 @@ and requires an existing service registered with `npm run autostart:setup`.
 
 The gateway can also run in a container with its own pi configuration and
 credentials, independent of the host's `~/.pi/agent`. No host pi installation
-is required. The image uses Ubuntu 26.04 with Node.js 24 and includes a minimal
+is required. The image uses Ubuntu 26.04 with Node.js 26 LTS and includes a minimal
 tool set: `bash`, `git`, `curl`, `ripgrep`, and `fd-find` (`fdfind`). Add anything
 else your projects need to the `Dockerfile`.
 
