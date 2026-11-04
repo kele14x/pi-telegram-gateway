@@ -288,21 +288,21 @@ try {
   // Extract and execute production session creation without gateway bootstrap.
   const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
   const ast = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const factory = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "createChatSession");
-  assert(factory, "production chat-session factory is present");
-  const chatMeta = new Map([[42, {thinking: "medium"}]]);
+  const workerSource = readFileSync(new URL("../agent-worker.ts", import.meta.url), "utf8");
+  const workerAst = ts.createSourceFile("agent-worker.ts", workerSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const factory = workerAst.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "createChatSession");
+  assert(factory, "production worker chat-session factory is present");
   const sandbox = vm.createContext({
     join, SessionManager, createChatResources, syncChatCwdContext, resolveCliModel,
-    SESSIONS_DIR: sessionsDir, AGENT_DIR: agentDir, modelRuntime: runtime, chatMeta,
-    MODEL_ARG: undefined, THINKING_ARG: undefined, APPEND_PROMPT: "GATEWAY_APPEND_ONLY",
-    CHAT_HINT: ["GATEWAY_HINT_ONLY"], log: () => {},
+    AGENT_DIR: agentDir, getModelRuntime: async () => runtime, log: () => {},
+    send: async () => {},
     createAgentSession: async options => {
       const result = await createAgentSession({...options, model: options.model ?? model});
       sessions.add(result.session);
       return result;
     },
   });
-  vm.runInContext(ts.transpileModule(factory.getText(ast), {compilerOptions: {target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None}}).outputText, sandbox);
+  vm.runInContext(ts.transpileModule(factory.getText(workerAst).replace(/^export /, ""), {compilerOptions: {target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None}}).outputText, sandbox);
 
   const folders = new Map([[42, "D:/synthetic-project"], [43, "D:/中文 folder"]]);
   const restored = parseChatMeta(serializeChatMeta(new Map([...folders].map(([id, cwd]) => [id, {cwd}]))));
@@ -310,7 +310,11 @@ try {
   const legacy = parseChatMeta('{"42":"D:/legacy","43":{"cwd":"D:/structured"},"44":null}');
   assert(legacy.get(42)?.cwd === "D:/legacy" && !legacy.has(44), "legacy metadata remains readable and invalid entries are ignored");
 
-  const create = cwd => sandbox.createChatSession(42, cwd);
+  const create = (cwd, chatId = 42) => sandbox.createChatSession({
+    method: "create", sessionId: chatId, chatId, cwd, sessionsDir,
+    storedThinking: chatId === 42 ? "medium" : undefined,
+    appendSystemPrompt: ["GATEWAY_HINT_ONLY", "", "GATEWAY_APPEND_ONLY"],
+  });
   const file = join(sessionsDir, "chat-42.jsonl");
   const first = await create(dirA);
   await first.prompt("Remember our existing conversation");
@@ -340,7 +344,7 @@ try {
   assert(activeB.includes("GATEWAY_HINT_ONLY") && activeB.includes("GATEWAY_APPEND_ONLY"), "gateway instructions remain in the new prompt");
   assert(!JSON.stringify(resolveTranscript(requestB, false)).includes("PROJECT_A_ONLY"), "collapsed provider request omits historical project A instructions");
   assert(requestB.messages.some(message => message.role === "system" && message.sections?.project_context?.includes("PROJECT_B_ONLY")), "native transcript carries a project-context replacement");
-  const other = await sandbox.createChatSession(43, dirA);
+  const other = await create(dirA, 43);
   assert(other.resourceLoader !== second.resourceLoader && other.settingsManager !== second.settingsManager, "chats do not share mutable loaders or settings");
   assert(other.settingsManager.getProjectSettings().defaultThinkingLevel === "low", "another chat keeps project A settings");
   second.settingsManager.setDefaultModelAndProvider("synthetic-provider", "synthetic-model");

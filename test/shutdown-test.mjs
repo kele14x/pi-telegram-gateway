@@ -19,7 +19,7 @@ const names = new Set([
   "trackDelivery", "wireSession", "ensureChat", "isCurrentChat", "advanceChatGeneration",
   "abortable", "getChatSession", "replaceChatSession", "enqueueChatJob", "submitPrompt", "enqueueChatOp",
   "safeSend", "redactSecrets", "proxyOrigin", "log", "shutdown", "performShutdown",
-  "recordEvent", "recordCancellation", "errorText",
+  "recordEvent", "recordCancellation", "errorText", "handleAgentFailure",
   "ChatOperationCancelled",
 ]);
 const declarations = ast.statements.filter(node =>
@@ -63,7 +63,8 @@ function makeGateway() {
     shuttingDown: false, shutdownPromise: null, SHUTDOWN_TIMEOUT_MS: 10_000,
     pendingDeliveries: new Set(), chats: new Map(), chatMeta: new Map(), events: null,
     DEFAULT_CWD: "synthetic-project", BOT_TOKEN: "synthetic-offline-token", PROXY_URL: undefined,
-    bot, console: {log: (...args) => logs.push(args.join(" "))},
+    bot, agentProcess: {stop: async () => { events.push("worker-stop"); }},
+    console: {log: (...args) => logs.push(args.join(" "))},
     process: {exit: status => events.push(`exit:${status}`)},
     setTimeout: (callback, delay) => { const id = ++nextTimer; timers.set(id, {callback, delay}); return id; },
     clearTimeout: id => timers.delete(id),
@@ -418,4 +419,33 @@ function append(chat, text) {
   assert.equal(gateway.messages.size, 0, "idle chats receive no shutdown messages");
 }
 
-console.log("Concurrent abort, queue/preflight cancellation, delivery drain, timeout, and shutdown-failure regressions passed");
+{
+  const gateway = makeGateway();
+  const { context, events, messages } = gateway;
+  const active = gateway.addChat(42);
+  const idle = gateway.addChat(43);
+  const queue = deferred();
+  active.state.chain = queue.promise;
+  context.submitPrompt(42, "queued-before-worker-failure");
+  active.session.isStreaming = true;
+  active.emit({ type: "agent_start" });
+  append(active, "partial-before-worker-failure");
+  const recorded = [];
+  context.events = { record: (event, fields) => recorded.push({ event, ...fields }) };
+  context.handleAgentFailure(new Error("synthetic worker failure"));
+  queue.resolve();
+  await active.state.chain;
+  await Promise.allSettled([...context.pendingDeliveries]);
+  assert.equal(active.state.session, null);
+  assert.equal(idle.state.session, null);
+  assert.equal(active.state.busy, 0);
+  assert.equal(context.shuttingDown, false, "worker failure must not shut down Telegram ingress");
+  assert(!events.some(event => event.startsWith("exit:") || event === "bot-stop"));
+  assert(recorded.some(entry => entry.event === "agent_worker_failed"));
+  const replies = [...messages.values()];
+  assert(replies.some(message => message.text === "partial-before-worker-failure"));
+  assert.equal(replies.filter(message => message.text.includes("agent process was interrupted")).length, 1);
+  assert(!replies.some(message => message.chatId === 43), "idle chats get no interruption notice");
+}
+
+console.log("Concurrent abort, queue/preflight cancellation, delivery drain, timeout, shutdown, and worker-failure regressions passed");

@@ -40,18 +40,9 @@ const ipv4Lookup: LookupFunction = (hostname, options, callback) => {
 };
 import { Telegraf } from "telegraf";
 import { HttpsProxyAgent } from "https-proxy-agent";
-import {
-  createAgentSession,
-  getAgentDir,
-  ModelRuntime,
-  resolveCliModel,
-  SessionManager,
-  type AgentSession,
-  type AgentSessionEvent,
-  type PromptOptions,
-} from "@earendil-works/pi-coding-agent";
+import { AgentProcess, type AgentSessionHandle } from "./agent-process.ts";
+import type { GatewayAgentEvent, ThinkingLevel } from "./agent-protocol.ts";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { createChatResources, syncChatCwdContext } from "./chat-resources.ts";
 import { parseChatMeta, writeChatMeta, type ChatMetaEntry } from "./chat-meta.ts";
 import { removeChatHistory } from "./history.ts";
 import { createEventLog, type EventFields, type GatewayEventLog } from "./gateway-events.ts";
@@ -109,7 +100,6 @@ const ALLOWED_USER_IDS = new Set(
 );
 
 const DEFAULT_CWD = resolve(process.env.PI_TELEGRAM_CWD ?? process.cwd());
-const AGENT_DIR = getAgentDir();
 const SESSIONS_DIR = resolve(
   process.env.PI_TELEGRAM_SESSIONS_DIR ?? join(import.meta.dirname, "sessions"),
 );
@@ -172,7 +162,7 @@ interface ChatState {
   chatId: number;
   /** Per-chat working folder. */
   cwd: string;
-  session: AgentSession | null;
+  session: AgentSessionHandle | null;
   stream: TelegramStream | null;
   /** Serializes prompt and queued command submission per chat. */
   chain: Promise<void>;
@@ -181,7 +171,7 @@ interface ChatState {
   /** Aborts asynchronous preflight work owned by the current generation. */
   generationController: AbortController;
   /** In-flight session creation — dedupes concurrent getChatSession() calls. */
-  sessionInit: Promise<AgentSession | undefined> | null;
+  sessionInit: Promise<AgentSessionHandle | undefined> | null;
   /** Session replacement in progress; new jobs wait for it before creating a session. */
   sessionReset: Promise<void> | null;
   /** Jobs currently executing; queued jobs are not included until they start. */
@@ -234,66 +224,21 @@ function expandHome(p: string): string {
   return p;
 }
 
-async function createChatSession(chatId: number, cwd: string, sessionsDir = SESSIONS_DIR): Promise<AgentSession> {
-  const sessionFile = join(sessionsDir, `chat-${chatId}.jsonl`);
-  // cwdOverride keeps tools working in the chat's current folder even though
-  // the session file header may record an older cwd.
-  const sm = SessionManager.open(sessionFile, sessionsDir, cwd);
-
-  type SessionOptions = NonNullable<Parameters<typeof createAgentSession>[0]>;
-  // Per-chat preferences (bound to the chat; survive /cwd, /new, and restarts)
-  // take priority over the PI_TELEGRAM_MODEL / PI_TELEGRAM_THINKING startup env.
+async function createChatSession(chatId: number, cwd: string, sessionsDir = SESSIONS_DIR): Promise<AgentSessionHandle> {
   const meta = chatMeta.get(chatId);
-  let cliModel = meta?.model ?? MODEL_ARG;
-  const thinkingPref = meta?.thinking ?? THINKING_ARG;
-  let model: SessionOptions["model"];
-  let thinkingLevel = thinkingPref as SessionOptions["thinkingLevel"];
-  if (cliModel) {
-    let r = resolveCliModel({ cliModel, modelRuntime });
-    if (r.error && meta?.model) {
-      // A stored per-chat model can outlive its catalog entry; degrade to the
-      // startup default instead of blocking the chat.
-      log(`[chat ${chatId}] stored model "${meta.model}" no longer resolves (${r.error}); using startup default`);
-      recordEvent("model_fallback", { chat: chatId, stored: meta.model, error: r.error, using: MODEL_ARG ?? "pi default" });
-      cliModel = MODEL_ARG;
-      if (cliModel) r = resolveCliModel({ cliModel, modelRuntime });
-    }
-    if (cliModel) {
-      if (r.error) throw new Error(`Bad PI_TELEGRAM_MODEL: ${r.error}`);
-      model = r.model;
-      if (r.thinkingLevel) thinkingLevel = r.thinkingLevel as SessionOptions["thinkingLevel"];
-    }
-  }
-
-  const resources = await createChatResources(
-    cwd, AGENT_DIR, APPEND_PROMPT ? [...CHAT_HINT, "", APPEND_PROMPT] : CHAT_HINT,
-  );
-  const { session } = await createAgentSession({
-    cwd,
-    agentDir: AGENT_DIR,
-    modelRuntime,
-    // A chat may change its model/thinking level without rewriting the
-    // owner's global pi settings or affecting another Telegram chat.
-    ...resources,
-    sessionManager: sm,
-    model,
-    thinkingLevel,
-  });
-  try {
-    await syncChatCwdContext(session, cwd);
-  } catch (err) {
-    session.dispose();
-    throw err;
-  }
-  return session;
+  return agentProcess.createSession({
+    chatId, cwd, sessionsDir, model: MODEL_ARG, thinking: THINKING_ARG,
+    storedModel: meta?.model, storedThinking: meta?.thinking,
+    appendSystemPrompt: APPEND_PROMPT ? [...CHAT_HINT, "", APPEND_PROMPT] : CHAT_HINT,
+  }, chats.get(chatId)?.generationController.signal);
 }
 
-function wireSession(st: ChatState, session: AgentSession, stream: TelegramStream) {
+function wireSession(st: ChatState, session: AgentSessionHandle, stream: TelegramStream) {
   const chatId = st.chatId;
   const errors = new SessionErrorBuffer();
   let retries = 0;
   let aborted = false;
-  session.subscribe((event: AgentSessionEvent) => {
+  session.subscribe((event: GatewayAgentEvent) => {
     switch (event.type) {
       case "agent_start": {
         errors.beginAttempt();
@@ -440,7 +385,7 @@ async function getChatSession(
   chatId: number,
   expectedState?: ChatState,
   expectedGeneration?: number,
-): Promise<AgentSession> {
+): Promise<AgentSessionHandle> {
   const st = expectedState ?? ensureChat(chatId);
   const generation = expectedGeneration ?? st.generation;
   for (;;) {
@@ -457,10 +402,10 @@ async function getChatSession(
       const initGeneration = st.generation;
       const cwdAtCreate = st.cwd;
       st.sessionInit = createChatSession(chatId, cwdAtCreate)
-        .then((session) => {
+        .then(async (session) => {
           if (!isCurrentChat(st, initGeneration) || st.cwd !== cwdAtCreate) {
             log(`[chat ${chatId}] discarding superseded session (raced with /new or /cwd)`);
-            session.dispose();
+            await session.dispose();
             return undefined;
           }
           st.session = session;
@@ -480,7 +425,7 @@ async function getChatSession(
     if (next) {
       if (!isCurrentChat(st, generation)) {
         await next.abort().catch(() => {});
-        next.dispose();
+        await next.dispose();
         throw new ChatOperationCancelled();
       }
       return next;
@@ -516,7 +461,7 @@ function replaceChatSession(st: ChatState, removeHistory: boolean): Promise<void
     await Promise.all(activeJobs.map((job) => job.catch(() => {})));
     if (oldSession) {
       try {
-        oldSession.dispose();
+        await oldSession.dispose();
       } catch (err) {
         log(`[session] dispose: ${String((err as Error)?.message ?? err)}`);
       }
@@ -600,11 +545,12 @@ function submitPrompt(
         return;
       }
       if (!isCurrentChat(st, gen)) return;
-      let session: AgentSession;
+      let session: AgentSessionHandle;
       try {
         session = await getChatSession(chatId, st, gen);
       } catch (err) {
-        if (err instanceof ChatOperationCancelled) {
+        if ((err as Error)?.name === "AgentWorkerUnavailable") return;
+        if (err instanceof ChatOperationCancelled || (err as Error)?.name === "AgentOperationCancelled") {
           log(`[chat ${chatId}] dropped queued message after cancellation`);
           return;
         }
@@ -622,12 +568,10 @@ function submitPrompt(
         return;
       }
       try {
-        const options: PromptOptions = {
+        const options: Parameters<AgentSessionHandle["prompt"]>[1] = {
           images: loaded.value,
           preflightResult: (accepted) => {
-            // The SDK invokes this synchronously after async prompt preflight
-            // and immediately before starting the agent. Throwing here closes
-            // the last cancellation gap for /stop, /new, and /cwd.
+            // The worker also guards the SDK's low-level start and queue boundaries.
             if (accepted && !isCurrentChat(st, gen)) throw new ChatOperationCancelled();
           },
         };
@@ -636,7 +580,8 @@ function submitPrompt(
         // A cancellation may have raced with prompt preflight/queueing.
         if (!isCurrentChat(st, gen)) session.clearQueue();
       } catch (err) {
-        if (err instanceof ChatOperationCancelled) {
+        if ((err as Error)?.name === "AgentWorkerUnavailable") return;
+        if (err instanceof ChatOperationCancelled || (err as Error)?.name === "AgentOperationCancelled") {
           session.clearQueue();
           log(`[chat ${chatId}] dropped prompt during cancellation preflight`);
           return;
@@ -650,7 +595,7 @@ function submitPrompt(
       st.busy--;
     }
   }).catch((err) => {
-    if (err instanceof ChatOperationCancelled) return;
+    if (err instanceof ChatOperationCancelled || (err as Error)?.name === "AgentOperationCancelled") return;
     log(`[chat ${chatId}] queued prompt failed: ${String((err as Error)?.message ?? err)}`);
   });
 }
@@ -831,17 +776,11 @@ bot.command("model", async (ctx) => {
         await ctx.reply(`🔄 ${r ? "Cycled" : "No models to cycle through"} — now: ${m ? `${m.provider}/${m.id}` : "?"}`);
         return;
       }
-      const r = resolveCliModel({ cliModel: arg, modelRuntime });
-      if (r.error || !r.model) {
-        await ctx.reply(`⚠️ ${r.error ?? "Model not found"}`);
-        return;
-      }
-      if (!isCurrentChat(st, generation)) return;
       const beforeModel = modelName(session.model);
       const beforeThinking = session.thinkingLevel;
-      await session.setModel(r.model);
-      if (r.thinkingLevel) await session.setThinkingLevel(r.thinkingLevel);
-      const patch: Partial<ChatMetaEntry> = { model: `${r.model.provider}/${r.model.id}` };
+      const r = await session.setModel(arg);
+      const model = session.model!;
+      const patch: Partial<ChatMetaEntry> = { model: `${model.provider}/${model.id}` };
       if (r.thinkingLevel) patch.thinking = r.thinkingLevel;
       const persisted = saveChatMeta(ctx.chat.id, patch);
       recordEvent("settings_changed", { chat: ctx.chat.id, setting: "model", from: beforeModel, to: patch.model, persisted });
@@ -850,12 +789,12 @@ bot.command("model", async (ctx) => {
       }
       if (isCurrentChat(st, generation)) {
         await ctx.reply(
-          `✓ Model set to ${r.model.provider}/${r.model.id}` +
+          `✓ Model set to ${model.provider}/${model.id}` +
             (persisted ? "" : "\n\n⚠️ Couldn't save this choice to meta.json — it will revert after a restart."),
         );
       }
     } catch (err) {
-      if (err instanceof ChatOperationCancelled) return;
+      if (err instanceof ChatOperationCancelled || (err as Error)?.name === "AgentOperationCancelled") return;
       // safeSend redacts: a failed ctx.reply above can carry the token-bearing API URL.
       await safeSend(ctx.chat.id, `⚠️ ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -878,7 +817,7 @@ bot.command("thinking", async (ctx) => {
       }
       if (arg === "cycle") {
         const before = session.thinkingLevel;
-        const level = session.cycleThinkingLevel();
+        const level = await session.cycleThinkingLevel();
         if (level) {
           const persisted = saveChatMeta(ctx.chat.id, { thinking: level });
           recordEvent("settings_changed", { chat: ctx.chat.id, setting: "thinking", from: before, to: level, persisted });
@@ -892,7 +831,7 @@ bot.command("thinking", async (ctx) => {
       }
       if (!isCurrentChat(st, generation)) return;
       const before = session.thinkingLevel;
-      session.setThinkingLevel(arg as (typeof THINKING_LEVELS)[number]);
+      await session.setThinkingLevel(arg as ThinkingLevel);
       const persisted = saveChatMeta(ctx.chat.id, { thinking: arg });
       recordEvent("settings_changed", { chat: ctx.chat.id, setting: "thinking", from: before, to: arg, persisted });
       if (isCurrentChat(st, generation)) {
@@ -902,7 +841,7 @@ bot.command("thinking", async (ctx) => {
         );
       }
     } catch (err) {
-      if (err instanceof ChatOperationCancelled) return;
+      if (err instanceof ChatOperationCancelled || (err as Error)?.name === "AgentOperationCancelled") return;
       // safeSend redacts: a failed ctx.reply above can carry the token-bearing API URL.
       await safeSend(ctx.chat.id, `⚠️ ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -921,11 +860,15 @@ bot.command("stop", async (ctx) => {
   recordCancellation(st, "stop");
   advanceChatGeneration(st);
   const session = st.session;
-  session?.clearQueue();
-  // Abort is deliberately not awaited: the update handler must return so
-  // polling remains responsive while the provider winds down.
-  if (session) void session.abort().catch((err) => log(`[stop] abort: ${String((err as Error)?.message ?? err)}`));
-  await ctx.reply("🛑 Aborted the current run and dropped queued messages.");
+  if (session) {
+    void session.cancel().then(() => ctx.reply("🛑 Stop requested and queued messages dropped.")).catch(err => {
+      log(`[stop] cancel: ${errorText(err)}`);
+      if ((err as Error)?.name !== "AgentWorkerUnavailable") void safeSend(ctx.chat.id, "The agent could not confirm cancellation. Please check the gateway log.");
+    });
+    void session.abort().catch((err) => log(`[stop] abort: ${errorText(err)}`));
+  } else {
+    await ctx.reply("🛑 Cancelled pending work and dropped queued messages.");
+  }
 });
 
 bot.command("status", async (ctx) => {
@@ -1013,7 +956,7 @@ bot.command("sessions", async (ctx) => {
     `🗂 Session for this chat\n` +
       `File: ${file}\n` +
       `Size: ${size}\n` +
-      `Messages in context: ${s.messages.length}\n` +
+      `Messages in context: ${s.messageCount}\n` +
       `History: persistent for this chat\n\n` +
       `Use /new for a fresh conversation (keeps the working folder), /cwd <folder> to change folder.`,
   );
@@ -1192,7 +1135,27 @@ function proxyOrigin(url: string): string {
 
 const isSelftest = process.argv.includes("--selftest");
 
-let modelRuntime!: ModelRuntime;
+function handleAgentFailure(err: Error) {
+  if (shuttingDown) return;
+  log(`[agent] ${err.message}`);
+  recordEvent("agent_worker_failed", { error: err.message });
+  for (const st of chats.values()) {
+    const active = st.busy > 0 || !!st.session?.isStreaming || !!st.sessionInit;
+    advanceChatGeneration(st);
+    st.session = null;
+    st.runStartedAt = null;
+    const stream = st.stream;
+    st.stream = null;
+    if (stream) void trackDelivery(stream.finalize().catch(error => log(`[agent] partial delivery: ${errorText(error)}`)));
+    if (active) void safeSend(st.chatId, "The agent process was interrupted. Saved history was kept; unfinished work will not be retried automatically. Send a new message to restart the agent.");
+  }
+}
+
+const agentProcess = new AgentProcess({
+  onFailure: handleAgentFailure,
+  onLog: text => log(`[agent] ${text.trimEnd()}`),
+  onLifecycle: (event, fields) => recordEvent(event, fields),
+});
 
 async function main() {
   if (!isSelftest && !acquireLock()) {
@@ -1218,12 +1181,7 @@ async function main() {
 
   if (!isSelftest) assertValidConfig();
 
-  modelRuntime = await ModelRuntime.create();
-
-  // Refresh model catalogs in the background (best-effort).
-  modelRuntime
-    .refresh({ allowNetwork: true, signal: AbortSignal.timeout(15_000) })
-    .catch(() => {});
+  await agentProcess.start();
 
   if (isSelftest) {
     log("selftest: creating a session and sending one prompt (no Telegram involved)…");
@@ -1231,7 +1189,7 @@ async function main() {
     const tmpSessions = mkdtempSync(join(os.tmpdir(), "pi-gw-selftest-"));
     const out: string[] = [];
     let failed: unknown = null;
-    let session: AgentSession | undefined;
+    let session: AgentSessionHandle | undefined;
     try {
       session = await createChatSession(0x0bad0bad, DEFAULT_CWD, tmpSessions);
       session.subscribe((event) => {
@@ -1249,10 +1207,11 @@ async function main() {
     } finally {
       // Dispose even when the prompt failed, then remove the temp sessions dir.
       try {
-        session?.dispose();
+        await session?.dispose();
       } catch {
         /* ignore */
       }
+      await agentProcess.stop();
       try {
         rmSync(tmpSessions, { recursive: true, force: true });
       } catch {
@@ -1325,7 +1284,15 @@ function shutdown(signal: NodeJS.Signals): Promise<void> {
 
 async function performShutdown(signal: NodeJS.Signals) {
   log("shutting down…");
+  const startedAt = Date.now();
   const states = [...chats.values()];
+  const disposed = new Set<ChatState>();
+  const disposeSession = async (st: ChatState) => {
+    if (disposed.has(st)) return;
+    disposed.add(st);
+    try { await st.session?.dispose(); }
+    catch (err) { log(`[shutdown] dispose: ${errorText(err)}`); }
+  };
   const activeStates = states.filter((st) => st.busy > 0 || st.session?.isStreaming);
   recordEvent("stopping", { signal, activeChats: activeStates.length });
   for (const st of activeStates) recordCancellation(st, "shutdown");
@@ -1371,6 +1338,7 @@ async function performShutdown(signal: NodeJS.Signals) {
     while (pendingDeliveries.size > 0) {
       await Promise.allSettled([...pendingDeliveries]);
     }
+    await Promise.all(states.map(disposeSession));
   });
   try {
     await Promise.race([cleanup, deadline]);
@@ -1383,12 +1351,9 @@ async function performShutdown(signal: NodeJS.Signals) {
   }
   for (const st of states) {
     st.stream?.cancel();
-    try {
-      st.session?.dispose();
-    } catch (err) {
-      log(`[shutdown] dispose: ${String((err as Error)?.message ?? err)}`);
-    }
+    void disposeSession(st);
   }
+  await agentProcess.stop(timedOut ? 0 : Math.max(0, SHUTDOWN_TIMEOUT_MS - (Date.now() - startedAt)));
   process.exit(0);
 }
 
