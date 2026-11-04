@@ -3,7 +3,7 @@ FROM ubuntu:26.04
 
 # safe.directory: bind-mounted workspaces may be owned by a different uid than the container user.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends bash ca-certificates curl git ripgrep fd-find libatomic1 libstdc++6 procps \
+  && apt-get install -y --no-install-recommends bash ca-certificates curl git ripgrep fd-find libatomic1 libstdc++6 procps build-essential pkg-config python3 python3-venv python3-pip jq zip unzip openssh-client tmux \
   && rm -rf /var/lib/apt/lists/* \
   && git config --system safe.directory '*' \
   && useradd --create-home --user-group node

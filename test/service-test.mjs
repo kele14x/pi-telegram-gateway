@@ -198,6 +198,13 @@ const dockerfile = readFileSync(new URL("../Dockerfile", import.meta.url), "utf8
 assert.match(dockerfile, /^FROM node:26-slim AS node-runtime\nFROM ubuntu:26\.04$/m);
 assert.match(dockerfile, /^COPY --from=node-runtime \/usr\/local\/ \/usr\/local\/$/m, "Ubuntu must include the official Node 26 runtime and npm");
 assert.match(dockerfile, /apt-get install[^\n]*\blibatomic1\b[^\n]*\blibstdc\+\+6\b/, "Node shared-library dependencies must be installed");
+const installedPackages = dockerfile.match(/apt-get install -y --no-install-recommends ([^\n]+)/)[1].trim().split(/\s+/);
+for (const name of ["build-essential", "pkg-config", "python3", "python3-venv", "python3-pip", "jq", "zip", "unzip", "openssh-client", "tmux"]) {
+  assert(installedPackages.includes(name), `the image must include ${name}`);
+}
+for (const name of ["cmake", "ninja-build"]) {
+  assert(!installedPackages.includes(name), `the image must not explicitly install ${name}`);
+}
 assert.match(dockerfile, /useradd --create-home --user-group node/, "Ubuntu must provide the node account and home directory");
 assert.match(dockerfile, /^USER node$/m, "the image must remain non-root by default");
 const podman = readFileSync(new URL("../compose.podman.yaml", import.meta.url), "utf8");
