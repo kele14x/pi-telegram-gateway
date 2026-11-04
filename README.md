@@ -147,9 +147,9 @@ and requires an existing service registered with `npm run autostart:setup`.
 
 The gateway can also run in a container with its own pi configuration and
 credentials, independent of the host's `~/.pi/agent`. No host pi installation
-is required. The image includes a minimal tool set: `bash`, `git`, `curl`,
-`ripgrep`, and `fd-find` (`fdfind`). Add anything else your projects need to the
-`Dockerfile`.
+is required. The image uses Ubuntu 26.04 with Node.js 24 and includes a minimal
+tool set: `bash`, `git`, `curl`, `ripgrep`, and `fd-find` (`fdfind`). Add anything
+else your projects need to the `Dockerfile`.
 
 ```bash
 cp .env.example .env        # set TELEGRAM_BOT_TOKEN and ALLOWED_TELEGRAM_IDS

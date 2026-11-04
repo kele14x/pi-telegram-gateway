@@ -194,6 +194,12 @@ try {
 
 const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 const compose = readFileSync(new URL("../docker-compose.yml", import.meta.url), "utf8");
+const dockerfile = readFileSync(new URL("../Dockerfile", import.meta.url), "utf8");
+assert.match(dockerfile, /^FROM node:24-slim AS node-runtime\nFROM ubuntu:26\.04$/m);
+assert.match(dockerfile, /^COPY --from=node-runtime \/usr\/local\/ \/usr\/local\/$/m, "Ubuntu must include the official Node 24 runtime and npm");
+assert.match(dockerfile, /apt-get install[^\n]*\blibatomic1\b[^\n]*\blibstdc\+\+6\b/, "Node shared-library dependencies must be installed");
+assert.match(dockerfile, /useradd --create-home --user-group node/, "Ubuntu must provide the node account and home directory");
+assert.match(dockerfile, /^USER node$/m, "the image must remain non-root by default");
 const podman = readFileSync(new URL("../compose.podman.yaml", import.meta.url), "utf8");
 const podmanUnit = readFileSync(new URL("../contrib/pi-telegram-gateway-podman.service", import.meta.url), "utf8");
 const help = readFileSync(new URL("../scripts/help.mjs", import.meta.url), "utf8");

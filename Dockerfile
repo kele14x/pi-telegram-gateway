@@ -1,10 +1,14 @@
-FROM node:24-slim
+FROM node:24-slim AS node-runtime
+FROM ubuntu:26.04
 
 # safe.directory: bind-mounted workspaces may be owned by a different uid than the container user.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends bash ca-certificates curl git ripgrep fd-find \
+  && apt-get install -y --no-install-recommends bash ca-certificates curl git ripgrep fd-find libatomic1 libstdc++6 \
   && rm -rf /var/lib/apt/lists/* \
-  && git config --system safe.directory '*'
+  && git config --system safe.directory '*' \
+  && useradd --create-home --user-group node
+
+COPY --from=node-runtime /usr/local/ /usr/local/
 
 WORKDIR /app
 # --chmod: host checkout permissions must not decide whether the non-root
