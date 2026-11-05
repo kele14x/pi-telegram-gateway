@@ -85,7 +85,7 @@ Telegram user ──> telegraf long-polling ──> index.ts handlers
 | `scripts/rotate-logs.mjs` | archives non-empty logs before managed launches and retains 20 archives per log type |
 | `scripts/linux-service.mjs` | safely installs/removes a per-user systemd unit; login startup, crash recovery, child-process cleanup, no embedded credentials |
 | `scripts/help.mjs` | `npm run help` cheat sheet |
-| `Dockerfile` / `docker-compose.yml` / `.dockerignore` | Ubuntu 26.04 with Node 26 LTS + bash/git/curl/ripgrep/fd-find; one managed data volume for isolated pi config, history, and locks; interactive pi setup; only the workspace is host-mounted |
+| `Dockerfile` / `docker-compose.yml` / `.dockerignore` | single-stage `node:26-slim` (Debian 13) with Node 26 LTS + bash/git/curl/ripgrep/fd-find; one managed data volume for isolated pi config, history, and locks; interactive pi setup; only the workspace is host-mounted |
 | `compose.podman.yaml` | Podman-only Compose override: `userns_mode: keep-id` and private SELinux workspace label; never merge into `docker-compose.yml` |
 | `contrib/pi-telegram-gateway-podman.service` | systemd user unit template for rootless Podman Compose autostart; foreground `up`, `down` on stop |
 | `test/` | `npm test` runs ten offline scripts: `stream-test.mjs` (formatting/chunking/retry), `cd-test.mjs` (cwd override reopen), `chat-meta-test.mjs` (meta.json parse/write), `settings-test.mjs` (settings isolation), `lock-test.mjs` (instance lock), `events-test.mjs` (lifecycle event log), `residual-test.mjs` (errors/history removal/redaction), `shutdown-test.mjs` (abort/delivery/deadline), `rotation-test.mjs` (log rotation), `service-test.mjs` (Linux service management and container recipes) |

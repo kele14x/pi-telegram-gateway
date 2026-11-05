@@ -195,8 +195,9 @@ try {
 const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 const compose = readFileSync(new URL("../docker-compose.yml", import.meta.url), "utf8");
 const dockerfile = readFileSync(new URL("../Dockerfile", import.meta.url), "utf8");
-assert.match(dockerfile, /^FROM node:26-slim AS node-runtime\nFROM ubuntu:26\.04$/m);
-assert.match(dockerfile, /^COPY --from=node-runtime \/usr\/local\/ \/usr\/local\/$/m, "Ubuntu must include the official Node 26 runtime and npm");
+assert.match(dockerfile, /^FROM node:26-slim$/m, "the image must build on the official Node 26 runtime");
+assert(!/^FROM (?!node:26-slim)/m.test(dockerfile), "the build must stay single-stage on node:26-slim");
+assert(!/\bCOPY --from=/.test(dockerfile), "no foreign runtime may be copied into the image");
 assert.match(dockerfile, /apt-get install[^\n]*\blibatomic1\b[^\n]*\blibstdc\+\+6\b/, "Node shared-library dependencies must be installed");
 const installedPackages = dockerfile.match(/apt-get install -y --no-install-recommends ([^\n]+)/)[1].trim().split(/\s+/);
 for (const name of ["build-essential", "pkg-config", "python3", "python3-venv", "python3-pip", "jq", "zip", "unzip", "openssh-client", "tmux"]) {
@@ -205,8 +206,9 @@ for (const name of ["build-essential", "pkg-config", "python3", "python3-venv", 
 for (const name of ["cmake", "ninja-build"]) {
   assert(!installedPackages.includes(name), `the image must not explicitly install ${name}`);
 }
-assert.match(dockerfile, /useradd --create-home --user-group node/, "Ubuntu must provide the node account and home directory");
+assert(!/\buseradd\b/.test(dockerfile), "node:26-slim already provides the node account and home directory");
 assert.match(dockerfile, /^USER node$/m, "the image must remain non-root by default");
+assert.match(dockerfile, /^ENTRYPOINT \[\]$/m, "the upstream docker-entrypoint.sh must be cleared");
 const podman = readFileSync(new URL("../compose.podman.yaml", import.meta.url), "utf8");
 const podmanUnit = readFileSync(new URL("../contrib/pi-telegram-gateway-podman.service", import.meta.url), "utf8");
 const help = readFileSync(new URL("../scripts/help.mjs", import.meta.url), "utf8");
