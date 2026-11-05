@@ -1,9 +1,10 @@
+// Manual test for the unsupported direct-host systemd example.
 // Offline log-rotation test. Uses only an isolated temporary directory.
 
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rotateGatewayLogs } from "../scripts/rotate-logs.mjs";
+import { rotateGatewayLogs } from "./rotate-logs.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "pi-gateway-rotation-"));
 try {

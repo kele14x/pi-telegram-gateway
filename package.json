@@ -8,15 +8,8 @@
     "node": ">=26"
   },
   "scripts": {
-    "start": "node --env-file-if-exists=.env index.ts",
-    "start:daemon": "node scripts/linux-service.mjs start:daemon",
-    "restart:daemon": "node scripts/linux-service.mjs restart:daemon",
-    "autostart:setup": "node scripts/linux-service.mjs autostart:setup",
-    "autostart:remove": "node scripts/linux-service.mjs autostart:remove",
-    "stop": "node scripts/linux-service.mjs stop",
     "selftest": "node --env-file-if-exists=.env index.ts --selftest",
-    "test": "node test/stream-test.mjs && node test/cd-test.mjs && node test/chat-meta-test.mjs && node test/settings-test.mjs && node test/lock-test.mjs && node test/events-test.mjs && node test/residual-test.mjs && node test/shutdown-test.mjs && node test/rotation-test.mjs && node test/service-test.mjs && node test/agent-process-test.mjs",
-    "status": "node scripts/linux-service.mjs status",
+    "test": "node test/stream-test.mjs && node test/cd-test.mjs && node test/chat-meta-test.mjs && node test/settings-test.mjs && node test/lock-test.mjs && node test/events-test.mjs && node test/residual-test.mjs && node test/shutdown-test.mjs && node test/agent-process-test.mjs && node test/container-test.mjs",
     "help": "node scripts/help.mjs",
     "typecheck": "tsc --noEmit"
   },

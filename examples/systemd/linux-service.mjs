@@ -1,4 +1,7 @@
-// Per-user systemd management. Does not read .env or embed credentials in units.
+// UNSUPPORTED EXAMPLE: per-user systemd management for a direct-host run.
+// Docker Compose is the supported deployment. This file is kept for reference
+// only and is not wired into package.json or the offline test suite.
+// It does not read .env or embed credentials in units.
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -7,8 +10,8 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const UNIT_NAME = "pi-telegram-gateway.service";
-const MARKER = "# Managed by pi-telegram-gateway (scripts/linux-service.mjs).";
-const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const MARKER = "# Managed by pi-telegram-gateway (examples/systemd/linux-service.mjs).";
+const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 function checked(value) {
   if (typeof value !== "string" || /[\x00-\x1f\x7f]/.test(value)) {
@@ -36,7 +39,7 @@ Description=pi Telegram coding-agent gateway
 Type=simple
 WorkingDirectory=${specifiers(root)}/.
 Environment=${quoted(`PATH=${searchPath}`)}
-ExecStartPre=${command(nodePath, join(root, "scripts", "rotate-logs.mjs"), "--root", root)}
+ExecStartPre=${command(nodePath, join(root, "examples", "systemd", "rotate-logs.mjs"), "--root", root)}
 ExecStart=${command(nodePath, "--env-file-if-exists=.env", join(root, "index.ts"))}
 Restart=on-failure
 RestartSec=60s
@@ -67,9 +70,9 @@ export function manageLinuxService(action, {
   const unitPath = join(configHome, "systemd", "user", UNIT_NAME);
   const systemctl = (args, allowFailure = false) => {
     const result = run("systemctl", ["--user", ...args], { encoding: "utf8", stdio: "pipe" });
-    if (result.error?.code === "ENOENT") throw new Error("Linux managed startup requires systemctl; use npm start if systemd is unavailable.");
+    if (result.error?.code === "ENOENT") throw new Error("Linux managed startup requires systemctl; use Docker Compose if systemd is unavailable.");
     if (!allowFailure && (result.error || result.status !== 0)) {
-      throw new Error(`systemctl --user ${args[0]} failed. Check your user systemd session; use npm start in containers without systemd.`);
+      throw new Error(`systemctl --user ${args[0]} failed. Check your user systemd session; use Docker Compose in containers without systemd.`);
     }
     return result;
   };
@@ -116,10 +119,10 @@ export function manageLinuxService(action, {
   }
   if (!installed && action !== "autostart:setup") {
     if (action === "stop") {
-      print("No managed gateway service is installed. Stop a foreground npm start with Ctrl+C.");
+      print("No managed gateway service is installed. Stop a foreground run with Ctrl+C.");
       return;
     }
-    throw new Error("Gateway user service is not installed; run npm run autostart:setup first.");
+    throw new Error("Gateway user service is not installed; run: node examples/systemd/linux-service.mjs autostart:setup first.");
   }
 
   if (action === "autostart:setup") {
@@ -142,7 +145,7 @@ export function manageLinuxService(action, {
     systemctl(["daemon-reload"]);
     systemctl(["enable", UNIT_NAME]);
     print(`Registered user service: ${unitPath}`);
-    print("Autostart is enabled for login. Start now with: npm run start:daemon");
+    print("Autostart is enabled for login. Start now with: node examples/systemd/linux-service.mjs start:daemon");
   } else if (action === "autostart:remove") {
     // Stop the loaded unit before deleting its file, including after a repo move.
     systemctl(["stop", UNIT_NAME]);
@@ -160,7 +163,7 @@ export function manageLinuxService(action, {
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   try {
-    if (process.platform !== "linux") throw new Error("Managed daemon commands require Linux with systemd; use npm start for foreground operation.");
+    if (process.platform !== "linux") throw new Error("Managed daemon commands require Linux with systemd; run the gateway with Docker Compose.");
     manageLinuxService(process.argv[2]);
   } catch (error) {
     console.error(error.message);

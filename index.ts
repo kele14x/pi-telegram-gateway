@@ -6,8 +6,8 @@
  * AgentSession (history survives restarts). Replies stream into Telegram
  * as they are generated.
  *
- * Run:  npm start   (reads .env via --env-file-if-exists)
- * Test: npm run selftest   (creates a session and sends one prompt, no bot)
+ * Run:  docker compose up -d --build   (supported deployment)
+ * Test: npm run selftest   (host development diagnostic; one prompt, no bot)
  */
 
 import { mkdirSync, mkdtempSync, rmSync, readFileSync } from "node:fs";

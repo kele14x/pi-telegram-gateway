@@ -1,10 +1,10 @@
+// Manual test for the unsupported direct-host systemd example.
 // Offline lifecycle tests: only temporary files and a fake systemctl are used.
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildLinuxUnit, manageLinuxService, UNIT_NAME } from "../scripts/linux-service.mjs";
+import { buildLinuxUnit, manageLinuxService, UNIT_NAME } from "./linux-service.mjs";
 
 assert.throws(() => manageLinuxService("delete-everything"), /Unknown Linux service action/);
 assert.throws(() => buildLinuxUnit("/repo\nExecStart=bad", process.execPath, "/bin"), /control characters/);
@@ -191,101 +191,3 @@ try {
 } finally {
   rmSync(temporary, { recursive: true, force: true });
 }
-
-const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-const compose = readFileSync(new URL("../docker-compose.yml", import.meta.url), "utf8");
-const dockerfile = readFileSync(new URL("../Dockerfile", import.meta.url), "utf8");
-assert.match(dockerfile, /^FROM node:26-slim$/m, "the image must build on the official Node 26 runtime");
-assert(!/^FROM (?!node:26-slim)/m.test(dockerfile), "the build must stay single-stage on node:26-slim");
-assert(!/\bCOPY --from=/.test(dockerfile), "no foreign runtime may be copied into the image");
-assert.match(dockerfile, /apt-get install[^\n]*\blibatomic1\b[^\n]*\blibstdc\+\+6\b/, "Node shared-library dependencies must be installed");
-const installedPackages = dockerfile.match(/apt-get install -y --no-install-recommends ([^\n]+)/)[1].trim().split(/\s+/);
-for (const name of ["build-essential", "pkg-config", "python3", "python3-venv", "python3-pip", "jq", "zip", "unzip", "openssh-client", "tmux"]) {
-  assert(installedPackages.includes(name), `the image must include ${name}`);
-}
-for (const name of ["cmake", "ninja-build"]) {
-  assert(!installedPackages.includes(name), `the image must not explicitly install ${name}`);
-}
-assert(!/\buseradd\b/.test(dockerfile), "node:26-slim already provides the node account and home directory");
-assert.match(dockerfile, /^USER node$/m, "the image must remain non-root by default");
-assert.match(dockerfile, /^ENTRYPOINT \[\]$/m, "the upstream docker-entrypoint.sh must be cleared");
-const podman = readFileSync(new URL("../compose.podman.yaml", import.meta.url), "utf8");
-const podmanUnit = readFileSync(new URL("../contrib/pi-telegram-gateway-podman.service", import.meta.url), "utf8");
-const help = readFileSync(new URL("../scripts/help.mjs", import.meta.url), "utf8");
-const setupService = compose.split("\n  pi-setup:\n")[1].split("\nvolumes:\n")[0];
-for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"]) {
-  assert.match(setupService, new RegExp(`^      ${name}:$`, "m"), "unset proxies must stay unset rather than suppress saved settings");
-}
-assert(!setupService.includes("env_file:") && !setupService.includes("TELEGRAM_BOT_TOKEN"), "setup must not receive Telegram credentials");
-assert(!compose.includes("userns_mode:") && !compose.includes("/workspace:Z"), "Podman settings must not leak into Docker");
-assert.match(podman, /\/workspace:Z/, "only the Podman workspace mount gets a private SELinux label");
-assert.match(readme, /--userns=keep-id --security-opt label=disable/, "credential import must not relabel host pi configuration");
-assert.match(readme, /agent:\/host:ro"/, "credential import must keep the host mount read-only");
-assert.match(readme, /sh -ec '\n    umask 077/, "credential import must fail on errors and create private files");
-assert.match(readme, /-v pi-telegram-gateway_data:\/data/);
-const podmanCommands = [readme, podman, help].flatMap(text => text.match(/podman-compose --in-pod=false[^\n]+/g) ?? []);
-assert(podmanCommands.length >= 5);
-for (const command of podmanCommands) assert(command.includes("-p pi-telegram-gateway"), "all Podman commands must share the user unit's project name");
-for (const action of ["ExecStart", "ExecStop"]) {
-  assert.match(podmanUnit, new RegExp(`^${action}=.* -p pi-telegram-gateway `, "m"));
-}
-
-const setupRecipe = readme.match(/```bash\n(COMPOSE_BIN=[\s\S]*?)\n```/)[1];
-const providerSelection = setupRecipe.split("\nif [ -x")[0];
-const providerTemporary = mkdtempSync(join(tmpdir(), "pi-gateway-podman-provider-"));
-try {
-  const home = join(providerTemporary, "home");
-  const bin = join(providerTemporary, "bin");
-  const emptyBin = join(providerTemporary, "empty-bin");
-  const venvBin = join(home, ".local", "venvs", "podman-compose", "bin");
-  for (const directory of [bin, emptyBin, venvBin]) mkdirSync(directory, { recursive: true });
-  const distroProvider = join(bin, "podman-compose");
-  const venvProvider = join(venvBin, "podman-compose");
-  const customProvider = join(bin, "custom-provider");
-  const envProvider = join(bin, "env-provider");
-  for (const path of [distroProvider, venvProvider, customProvider, envProvider]) {
-    writeFileSync(path, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  }
-  const env = { HOME: home, PATH: bin, COMPOSE_BIN: "", PODMAN_COMPOSE: "" };
-  for (const [overrides, expected] of [
-    [{ COMPOSE_BIN: customProvider, PODMAN_COMPOSE: envProvider }, customProvider],
-    [{ PODMAN_COMPOSE: envProvider }, envProvider],
-    [{}, distroProvider],
-    [{ PATH: emptyBin }, venvProvider],
-  ]) {
-    const selected = execFileSync("/bin/sh", ["-c", providerSelection + '\nprintf "%s" "$COMPOSE_BIN"'], {
-      env: { ...env, ...overrides }, encoding: "utf8",
-    });
-    assert.equal(selected, expected, "provider selection must preserve overrides and support distro and venv installs");
-  }
-  const missing = spawnSync("/bin/sh", ["-c", setupRecipe], {
-    env: { ...env, COMPOSE_BIN: join(bin, "missing-provider") }, encoding: "utf8",
-  });
-  assert.equal(missing.status, 0);
-  assert.match(missing.stderr, /Set COMPOSE_BIN or PODMAN_COMPOSE/);
-  assert(!existsSync(join(home, ".config")), "missing providers must not render or register a unit");
-  writeFileSync(join(bin, "systemctl"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  execFileSync("/bin/sh", ["-c", setupRecipe], {
-    cwd: new URL("../", import.meta.url),
-    env: { ...env, PATH: `${bin}:/usr/bin:/bin`, COMPOSE_BIN: customProvider },
-  });
-  const renderedUnit = readFileSync(join(home, ".config", "systemd", "user", "pi-telegram-gateway-podman.service"), "utf8");
-  assert(renderedUnit.includes(`ExecStart=${customProvider} --in-pod=false -p pi-telegram-gateway`), "the rendered unit must use the selected provider and shared project name");
-  assert(!renderedUnit.includes("@COMPOSE_BIN@"));
-
-  const importHost = join(providerTemporary, "import-host");
-  const importAgent = join(providerTemporary, "import-agent");
-  mkdirSync(importHost);
-  mkdirSync(importAgent);
-  writeFileSync(join(importHost, "auth.json"), "{}\n", { mode: 0o644 });
-  const importRecipe = readme.match(/pi-telegram-gateway:latest sh -ec '([\s\S]*?)\n  '/)[1];
-  const importScript = importRecipe.replaceAll("/host/", `${importHost}/`).replaceAll("/data/pi-agent/", `${importAgent}/`);
-  execFileSync("/bin/sh", ["-ec", importScript]);
-  assert.equal(readFileSync(join(importAgent, "auth.json"), "utf8"), "{}\n");
-  assert.equal(statSync(join(importAgent, "auth.json")).mode & 0o777, 0o600, "imported credentials must be private");
-  const failedImport = spawnSync("/bin/sh", ["-ec", importScript.replaceAll(`${importAgent}/`, `${providerTemporary}/missing-agent/`)]);
-  assert.notEqual(failedImport.status, 0, "credential copy failures must not be hidden");
-} finally {
-  rmSync(providerTemporary, { recursive: true, force: true });
-}
-console.log("Container deployment recipe tests passed.");

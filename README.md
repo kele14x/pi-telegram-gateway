@@ -4,7 +4,7 @@
 </p>
 
 > A chat gateway: your own full-coding-agent
-> Telegram bot backed by the pi SDK, running on your machine.
+> Telegram bot backed by the pi SDK, running in a container on your machine.
 
 ## ✨ Features
 
@@ -27,28 +27,32 @@
 - **Per-chat model & thinking** — `/model anthropic/claude-opus-4-5:high`,
   `/thinking medium`; choices are bound to the chat and survive `/cwd`, `/new`,
   and gateway restarts
-- **Reuses your pi config** — same `~/.pi/agent` credentials, settings, models,
-  and extensions as your terminal pi. No extra API keys.
+- **Isolated pi configuration** — credentials, settings, models, and extensions
+  live in the Compose `data` volume (`/data/pi-agent`), not the host's
+  `~/.pi/agent`. No host pi installation or extra API keys are required.
 - **Queueing** — messages sent while the agent is busy are queued
   (`📥 Queued`), or interrupt with `/stop`
 - **Allowlist security** — only configured Telegram ids can talk to the agent
 
 ## 🧰 Requirements
 
-- Node.js 26 LTS or newer (runs TypeScript natively, no build step)
-- Linux with a systemd user manager for managed background operation;
-  foreground operation uses `npm start`
-- A pi install with a configured model key in `~/.pi/agent/auth.json`
+- Docker with the Compose plugin, or rootless Podman with `podman-compose`
 - A bot token from [@BotFather](https://t.me/BotFather)
+- Model credentials created once inside the container (`pi-setup`)
+
+Running the gateway directly on the host (`npm start`, host systemd units, or
+the former daemon scripts) is not supported.
 
 ## 🚀 Quick start
 
 ```bash
 git clone https://github.com/kele14x/pi-telegram-gateway.git
 cd pi-telegram-gateway
-npm install
 cp .env.example .env        # edit it
-npm start
+mkdir -p workspace          # or set PI_WORKSPACE to an existing folder
+docker compose run --rm --build pi-setup   # /login, /model, then /quit
+docker compose up -d --build
+docker compose logs -f
 ```
 
 `.env`:
@@ -59,11 +63,13 @@ ALLOWED_TELEGRAM_IDS=123456789       # your Telegram user id(s), comma separated
 ```
 
 **Don't know your Telegram id?** Start the gateway, send `/start` to your bot —
-it replies with your numeric id, and the gateway logs it too. Add it to
-`ALLOWED_TELEGRAM_IDS` and restart.
+it replies with your numeric id, and the gateway logs it too (`docker compose
+logs -f`). Add it to `ALLOWED_TELEGRAM_IDS` and restart with
+`docker compose up -d`.
 
 > ⚠️ **Security**: see the [Security](#-security) section. Short version — the
-> agent has full access to your machine, and the allowlist is the only gate.
+> agent has full access to its container and the mounted workspace, and the
+> allowlist is the only gate.
 
 ## 📖 Commands
 
@@ -89,8 +95,8 @@ The bot's command menu (`/` button) is synced automatically at startup via
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | – (required) | bot token |
 | `ALLOWED_TELEGRAM_IDS` | – (recommended) | comma-separated **user** ids allowed to chat; every group sender is checked individually; blocks everyone until set |
-| `PI_TELEGRAM_CWD` | launch dir | default working folder for new chats (`/cwd` overrides per chat) |
-| `PI_TELEGRAM_SESSIONS_DIR` | `./sessions` | where per-chat history is stored |
+| `PI_TELEGRAM_CWD` | `/workspace` | default working folder for new chats inside the container (`/cwd` overrides per chat) |
+| `PI_TELEGRAM_SESSIONS_DIR` | `/data/sessions` | where per-chat history is stored in the `data` volume |
 | `PI_TELEGRAM_MODEL` | session default | default model, e.g. `openai/gpt-5:medium` (pi `--model` syntax) |
 | `PI_TELEGRAM_THINKING` | session default | initial thinking level |
 | `PI_TELEGRAM_APPEND_PROMPT` | – | extra instructions appended to the system prompt |
@@ -98,60 +104,55 @@ The bot's command menu (`/` button) is synced automatically at startup via
 | `PI_TELEGRAM_IPV4_ONLY` | `false` | IPv4-first DNS + IPv4-only Telegram agent; enable only if broken IPv6 stalls calls (node-fetch v2 has no happy-eyeballs) |
 | `PI_TELEGRAM_DROP_PENDING_UPDATES` | `false` | discard updates received while the gateway was offline; opt in only when abandoning that backlog intentionally |
 
-## 🔄 Background operation and autostart
+## 🔄 Runtime behavior
 
-Managed background operation uses a Linux systemd user service:
+Docker Compose supervises the gateway in the background with
+`restart: unless-stopped` and a 15 s stop grace period:
 
 ```bash
-npm run autostart:setup   # register/refresh autostart; does not start the bot
-npm run start:daemon     # start the registered service now
-npm run restart:daemon   # gracefully stop and restart it; start it if stopped
-npm run status           # inspect service status
-npm run stop             # stop the managed gateway and its child processes
-npm run autostart:remove # stop and remove autostart; keep config/data/logs
+docker compose up -d --build   # start or apply code/.env changes
+docker compose logs -f         # follow output
+docker compose down            # graceful stop; keeps the data volume
+docker compose down -v         # destructive: deletes credentials and history
 ```
 
-Foreground operation remains `npm start`; stop it with Ctrl+C. Managed daemon
-commands require Linux with a working systemd user manager. On other operating
-systems or containers without systemd, use `npm start`.
-
 The gateway holds an atomic, heartbeat-backed single-instance lock
-(`logs/gateway.instance.lock`, with owner metadata in `logs/gateway.lock`) so
-a manual `npm start` cannot run a second, conflicting poller in the same checkout.
+(`/data/logs/gateway.instance.lock`, with owner metadata in
+`/data/logs/gateway.lock`) so a second container sharing the data volume cannot
+poll the same bot concurrently. `/app/logs` points at the same directory.
 
-The lock owner also appends lifecycle events to `logs/gateway-events.jsonl`, one
-JSON object per line, keeping roughly the newest 500: `start`, `stopping`
-(signal), `exit` (code), `fatal`, `shutdown_timeout`, `previous_run_unclean`
-(the last run crashed or was killed), `run_cancelled` (`/stop`, `/new`, or
-shutdown), `run_failed` (model, prompt, session, or photo errors), `settings_changed`
-(`/cwd`, `/model`, `/thinking`), `model_fallback`, and `history_reset`.
-Entries carry Telegram chat ids but never message text; known secrets are
-redacted. The agent's system prompt names this file so it can explain restarts
-or interrupted work.
+The lock owner also appends lifecycle events to
+`/data/logs/gateway-events.jsonl`, one JSON object per line, keeping roughly the
+newest 500: `start`, `stopping` (signal), `exit` (code), `fatal`,
+`shutdown_timeout`, `previous_run_unclean` (the last run crashed or was killed),
+`run_cancelled` (`/stop`, `/new`, or shutdown), `run_failed` (model, prompt,
+session, or photo errors), `settings_changed` (`/cwd`, `/model`, `/thinking`),
+`model_fallback`, and `history_reset`. Entries carry Telegram chat ids but never
+message text; known secrets are redacted. The agent's system prompt names this
+file so it can explain restarts or interrupted work.
 
-On `SIGINT` (Ctrl+C) or `SIGTERM`, the gateway cancels queued work, requests
-abort from all sessions concurrently, and waits for current jobs and pending
-Telegram replies for up to **10 seconds total** before disposing sessions and
-exiting. Chats with unfinished prompts receive an interruption notice when delivery
-succeeds; resend unfinished requests after restarting. A forced process kill
-bypasses this graceful shutdown.
+On `SIGTERM` (Compose stop/restart) or `SIGINT`, the gateway cancels queued work,
+requests abort from all sessions concurrently, and waits for current jobs and
+pending Telegram replies for up to **10 seconds total** before disposing sessions
+and exiting. Chats with unfinished prompts receive an interruption notice when
+delivery succeeds; resend unfinished requests after restarting. A forced process
+kill bypasses this graceful shutdown.
 
-Use `npm run restart:daemon` after changing code or `.env`. It runs
-`systemctl --user restart pi-telegram-gateway.service`, following the same
-graceful shutdown before starting again. It also starts an installed service
-that is currently stopped. Active work and queued prompts are cancelled;
-saved chat history is retained. Restart leaves autostart settings unchanged
-and requires an existing service registered with `npm run autostart:setup`.
+The former host systemd helper (`npm run autostart:*`, `start:daemon`,
+`restart:daemon`, `stop`, `status`) has been retired. A reference copy lives in
+`examples/systemd/` and is unsupported; do not mix it with the Compose deployment.
+For optional Linux autostart of the Compose stack, use the systemd templates in
+`contrib/` (Docker system unit, Podman user unit).
 
 ## 🐳 Docker
 
-The gateway can also run in a container with its own pi configuration and
-credentials, independent of the host's `~/.pi/agent`. No host pi installation
-is required. The image is built on the official `node:26-slim` image (Debian 13)
-with Node.js 26 LTS and includes a minimal tool set: `bash`, `git`, `curl`,
-`ripgrep`, and `fd-find` (`fdfind`), plus `build-essential`, `python3` with
-`venv`/`pip`, `jq`, `zip`/`unzip`, `openssh-client`, and `tmux`. Add anything else
-your projects need to the `Dockerfile`.
+The gateway runs in a container with its own pi configuration and credentials
+in the Compose `data` volume, independent of the host's `~/.pi/agent`. No host
+pi installation is required. The image is built on the official `node:26-slim`
+image (Debian 13) with Node.js 26 LTS and includes a minimal tool set: `bash`,
+`git`, `curl`, `ripgrep`, and `fd-find` (`fdfind`), plus `build-essential`,
+`python3` with `venv`/`pip`, `jq`, `zip`/`unzip`, `openssh-client`, and `tmux`.
+Add anything else your projects need to the `Dockerfile`.
 
 ```bash
 cp .env.example .env        # set TELEGRAM_BOT_TOKEN and ALLOWED_TELEGRAM_IDS
@@ -212,51 +213,59 @@ Notes:
 - Previous host pi configuration and separate Docker session/bin volumes are not
   imported or deleted. Authenticate separately; retain old volumes if you need
   to migrate history. `PI_AGENT_DIR` is no longer used by Compose.
-- Don't run a host `npm start` and the container with the same bot token at the
-  same time. Direct host operation still uses your host pi configuration.
 - The agent can access its credentials and mounted workspace; Docker isolation
   does not protect these from the agent. Prefer dedicated provider credentials
   with appropriate spending limits, and mount only folders you intend to expose.
-- Logs go to stdout (`docker compose logs`). The systemd `npm run *:daemon`
-  and `autostart:*` commands don't apply. Compose's `restart: unless-stopped`
+- Logs go to stdout (`docker compose logs`). Compose's `restart: unless-stopped`
   handles crash recovery and restarts the container when Docker starts.
 
-### Service setup
+### Host systemd
 
-Run `npm run autostart:setup` as your normal user, without `sudo`. It writes
-`~/.config/systemd/user/pi-telegram-gateway.service` (or
-`$XDG_CONFIG_HOME/systemd/user/pi-telegram-gateway.service`) and enables it for
-login startup. Start it immediately with `npm run start:daemon`. The service
-restarts 1 minute after a failure. `npm run stop` requests graceful shutdown
-and stops all child processes, including agent tools. A manual stop does not
-trigger an automatic restart; start it again with `npm run start:daemon`.
-Autostart remains enabled for the next user-manager startup (normally at login,
-or at boot with lingering). Use `npm run autostart:remove` to remove autostart.
+Direct host operation and its per-user systemd helper are no longer supported.
+The former helper is preserved as an unsupported example in
+[`examples/systemd/`](examples/systemd/README.md) for reference only. It is not
+wired into `package.json` or `npm test`, and it should not run alongside the
+Compose deployment.
 
-Node loads `.env` from the repository; credentials are never copied into the
-unit. The service uses your existing pi configuration in `~/.pi/agent`, pins
-the absolute Node and repository paths, and preserves the PATH available at
-setup time. Put proxy configuration in `.env` so the service receives it even
-when the user manager has a different environment from your shell.
+### Docker autostart (systemd system service)
 
-Logs go to `logs/gateway.log` and `logs/gateway-err.log`. Before each managed
-launch, non-empty logs are moved into `logs/archive/`; the newest 20 archives
-are retained for each log type. `npm run status` shows service state and PID;
-it does not print conversation history or log contents.
+For a normal rootful Docker installation, use the system-unit template. It runs
+`docker compose` as root, so no `docker` group membership is required. The
+container still runs as `PUID:PGID` from `.env`, so workspace file ownership is
+unchanged.
 
-Re-run setup after moving the repo, changing your PATH, or upgrading Node.
-Refreshing an existing service stops it; run `npm run start:daemon` afterward.
-Removal stops the registered service even when it points at an older repo
-location. Unrelated unit files and symlinks are rejected rather than replaced.
+```bash
+DOCKER_BIN="${DOCKER_BIN:-$(command -v docker || true)}"
+SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+if [ -x "$DOCKER_BIN" ]; then
+  sed -e "s|@PROJECT_DIR@|$PWD|g" \
+      -e "s|@DOCKER_BIN@|$DOCKER_BIN|g" \
+      -e "s|@DOCKER_DIR@|$(dirname "$DOCKER_BIN")|g" \
+      contrib/pi-telegram-gateway-docker.service \
+    | sudo tee "$SYSTEMD_UNIT_DIR/pi-telegram-gateway-docker.service" >/dev/null &&
+  sudo systemctl daemon-reload &&
+  sudo systemctl enable --now pi-telegram-gateway-docker.service
+else
+  printf '%s\n' 'Set DOCKER_BIN to an installed docker executable.' >&2
+fi
+```
 
-User services normally run while your login session is active. To keep the bot
-running after logout and start it at boot, optionally enable lingering with
-`loginctl enable-linger "$USER"` (your system may require administrator
-authorization). See [systemd user lingering](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html#enable-linger%20%5BUSER%E2%80%A6%5D).
+The unit starts after `docker.service`, runs `docker compose up` in the
+foreground, and runs `docker compose down` on stop with the shared
+`pi-telegram-gateway` project name. `Restart=always` restarts the stack after a
+crash. Manage it with `sudo systemctl`; running `docker compose down` manually
+while the unit is active will be restarted by systemd. As a system unit, it
+starts at boot without `loginctl enable-linger`.
+
+For rootless Docker, adapt the template as a user unit instead. For rootless
+Podman, use the Podman autostart section below.
+
+Do not run this unit, the Podman autostart unit, and another gateway with the
+same bot token at the same time: they would poll the same bot.
 
 ## 🦭 Podman
 
-The image and Compose stack also run under rootless Podman. Podman is a native
+The Compose stack also runs under rootless Podman. Podman is a native
 package (not Python); `podman-compose` is a separate Python provider. Keep
 Podman-only settings in `compose.podman.yaml`, not in `docker-compose.yml`:
 
@@ -351,21 +360,22 @@ systemd. Enable lingering for boot startup after logout:
 loginctl enable-linger "$USER"
 ```
 
-Do not run the host `npm run *:daemon`/autostart service and the Podman unit at
-the same time: both would poll the same bot token.
+Do not run this Podman stack and a Docker stack (or any other gateway) with
+the same bot token at the same time: both would poll the same bot.
 
 ## 🗃️ Sessions & working folders
 
-- Every chat gets its own session: `sessions/chat-<chatid>.jsonl`
-  (the same format pi uses), loaded lazily on first message and resumed on restart.
+- Every chat gets its own session in the data volume:
+  `/data/sessions/chat-<chatid>.jsonl` (the same format pi uses), loaded lazily
+  on first message and resumed on restart.
 - `/cwd <folder>` keeps the same history file and re-opens it with the new folder
   as the agent's working directory — your conversation continues where you left off.
   It refuses to switch while work is queued or active. Wait for completion, or
   use `/stop` to explicitly cancel prompts before retrying `/cwd`.
-- Per-chat folders persist across restarts in `sessions/meta.json`; per-chat
-  model/thinking choices are stored there too, so they survive `/cwd`, `/new`,
-  and restarts (a stored model that no longer exists falls back to the startup
-  default).
+- Per-chat folders persist across restarts in `/data/sessions/meta.json`;
+  per-chat model/thinking choices are stored there too, so they survive `/cwd`,
+  `/new`, and restarts (a stored model that no longer exists falls back to the
+  startup default).
 - Project instructions (`AGENTS.md`, including applicable ancestors), settings,
   skills, prompts, and extensions are loaded from the chat's current folder.
   Each reopened session gets its own loader and isolated settings.
@@ -377,8 +387,9 @@ the same time: both would poll the same bot token.
 
 ## 🔐 Security
 
-This gateway gives a Telegram user full access to a pi agent that runs on your
-machine — including the shell. Read this.
+This gateway gives a Telegram user full access to a pi agent that runs in a
+container on your machine — including shell access to the mounted workspace.
+Read this.
 
 **Access is gated by two independent secrets, both outside this repository:**
 
@@ -389,9 +400,8 @@ machine — including the shell. Read this.
    an attacker would also need one of your allowed accounts.
 
 **What is *not* in this repository:** your bot token (`.env`), per-chat
-conversation history (`sessions/`), or your pi model credentials
-(`~/.pi/agent/auth.json`). They are excluded or external — secrets are never
-committed.
+conversation history and pi model credentials (both in the Compose `data`
+volume). They are excluded or external — secrets are never committed.
 
 **Supply-chain caveat:** anyone with write access to the repo could push code
 that runs on your machine the next time you pull and start the gateway.
@@ -403,30 +413,36 @@ That holds for any software you run from git.
 - Don't `git pull` blindly; review the diff (or pin to a commit hash).
 - Don't add collaborators you don't trust; keep 2FA on your GitHub account.
 - If you add an auto-update feature, pin by signed tag or commit hash.
-- Treat the host running the gateway as fully controlled: the agent is as
+- Treat the host and mounted workspace as fully controlled: the agent is as
   powerful as you are at a terminal.
 
 ## 🔬 Development
 
 ```bash
-npm test              # run the nine offline regression scripts
+npm install
+npm test              # run the ten offline regression scripts
 npm run typecheck     # tsc --noEmit
-npm run selftest      # real model prompt using pi credentials (no Telegram bot needed)
+npm run selftest      # host development diagnostic: one real model prompt
 node test/commands-scope.mjs  # online diagnostic: reads .env and calls Telegram
 ```
 
 The `npm test` suite covers Markdown formatting/streaming/chunking/retries, `/cwd` and project context,
 chat metadata, settings isolation, instance locking, errors/history removal/redaction,
-shutdown, log rotation, and Linux service management. It uses mocks
-and temporary fixtures without contacting Telegram or a model provider.
+shutdown, isolated agent process execution, and the Docker/Podman Compose
+deployment recipes. It uses mocks and temporary fixtures without contacting
+Telegram or a model provider. Development requires Node.js 26 LTS or newer.
 The command-scope diagnostic inspects the bot's registered menus and is run
-manually, separately from the offline suite. `selftest` sends a real model prompt
-and may incur model usage costs.
+manually, separately from the offline suite. `selftest` runs on the host using
+your host pi configuration, is not the supported deployment path, and sends a
+real model prompt that may incur model usage costs.
 
 Layout:
 
 ```plaintext
 index.ts             bot wiring, session hub, commands
+agent-process.ts     isolated agent execution process
+agent-protocol.ts    parent/worker protocol messages
+agent-worker.ts      agent worker entrypoint
 chat-settings.ts     isolated per-chat pi settings
 chat-meta.ts         per-chat cwd/model/thinking persistence (meta.json)
 history.ts           failure-aware per-chat history removal
@@ -434,11 +450,13 @@ instance-lock.ts     atomic heartbeat-backed process lock
 session-errors.ts    terminal-vs-retry model error buffering
 telegram-stream.ts   live streaming + chunking into editable messages
 telegram-format.ts   Markdown to native Telegram text/entities + safe chunking
-scripts/rotate-logs.mjs  bounded pre-launch log rotation
-scripts/linux-service.mjs  systemd user-service setup and management
+scripts/help.mjs     npm run help cheat sheet
 Dockerfile, docker-compose.yml  container image and Compose deployment
+compose.podman.yaml  Podman-only Compose override
+contrib/             Docker/Podman Compose autostart unit templates
+examples/systemd/    unsupported direct-host systemd example
 test/                offline regressions, online command-menu diagnostic
-sessions/            per-chat session files (gitignored)
+sessions/            host-side data for the unsupported example (gitignored)
 ```
 
 ## 🛠️ Troubleshooting
@@ -447,8 +465,9 @@ sessions/            per-chat session files (gitignored)
   `HTTPS_PROXY`. If Telegram calls stall on a network with broken IPv6, set
   `PI_TELEGRAM_IPV4_ONLY=true` to force IPv4 DNS resolution (some Telegram
   CDN endpoints are only reachable via v4).
-- **`No matching model` / no API key**: check `~/.pi/agent/auth.json` and
-  `~/.pi/agent/settings.json` — the gateway uses the same config as normal pi.
+- **`No matching model` / no API key**: check `/data/pi-agent/auth.json` and
+  `/data/pi-agent/settings.json` in the Compose `data` volume (rerun
+  `docker compose run --rm --build pi-setup` to change credentials).
 - **Menu still shows old commands**: stale *scoped* lists from previous gateway
   software shadow the default list; the gateway resets
   `all_private_chats` / `all_group_chats` and default scopes at startup.

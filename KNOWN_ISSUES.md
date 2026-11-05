@@ -1,6 +1,6 @@
 # Known issues
 
-Open issues: **13** — P0: **0**, P1: **2**, P2: **11**.
+Open issues: **12** — P0: **0**, P1: **2**, P2: **10**.
 
 Issue IDs are retained from earlier reviews and stay unchanged when resolved.
 
@@ -58,19 +58,22 @@ Lower-impact behavior, diagnostic gaps, and documentation or test improvements.
   **Where:** `instance-lock.ts`.
   **Fix:** Add an explicit `onCompromised` callback that logs safely and exits.
 
-- **#12 — Lock/log location is fixed to the checkout.** Sessions have a configurable
-  directory, while the gateway lock and logs remain under the repository.
-  **Where:** `index.ts` (lock paths), lifecycle scripts.
+- **#12 — Lock/log location is fixed to the container data volume.** Sessions are
+  configurable, while the gateway lock and lifecycle logs always live under
+  `/data/logs` (via `/app/logs`).
+  **Where:** `index.ts` (lock paths), Compose volume layout.
   **Fix:** Document this contract or add configuration consistently across
-  runtime and lifecycle scripts.
+  runtime paths.
 
 - **#18 — Log retention uses locale-dependent ordering.** Retention counts are
-  correct, but archive ordering depends on the host locale.
-  **Where:** `scripts/rotate-logs.mjs`.
+  correct, but archive ordering depends on the host locale. This affects only the
+  unsupported example helper.
+  **Where:** `examples/systemd/rotate-logs.mjs`.
   **Fix:** Use ordinal comparison for timestamp-based archive names.
 
-- **#19 — The instance lock is per checkout, not per bot.** Two checkouts using the
-  same token can both start and split or lose Telegram updates.
+- **#19 — The instance lock is per data volume, not per bot.** Two Compose stacks
+  with separate `data` volumes using the same token can both start and split or
+  lose Telegram updates.
   **Where:** `index.ts` (lock paths), `instance-lock.ts`.
   **Fix:** Document the limitation or use a shared lock keyed by a token hash.
 
@@ -95,28 +98,23 @@ Lower-impact behavior, diagnostic gaps, and documentation or test improvements.
   **Fix:** Enforce the interval after first delivery, coalesce statuses, skip
   unchanged edits, and add a cadence regression to `test/stream-test.mjs`.
 
-- **#27 — One shared code copy does not support independent Linux users.**
-  Linux services are registered per user, but managed startup loads the checkout's
-  `.env`, sessions default to the checkout, and logs/locks use fixed checkout paths.
-  Users running separate gateways from the same code directory can encounter
-  shared configuration/data, permission errors, or a second instance being blocked.
-  Multiple Telegram users on one gateway are supported, but their agents all run
-  as the same Linux account. Related to #12 and #19.
-  **Where:** `index.ts` (config and runtime paths), `package.json` (startup),
-  `scripts/linux-service.mjs`, `scripts/rotate-logs.mjs`.
-  **Fix:** Add per-user configuration, session, log, and lock locations for a
-  shared code installation; preserve duplicate-bot protection and document a
-  separate bot token and pi configuration for each independent Linux user.
-
 ## Resolved
+
+- **#27 — Direct-host multi-user limitation retired.** Docker Compose (and the
+  rootless Podman Compose equivalent) is now the only supported deployment.
+  Each stack has its own Compose project and `data` volume for pi configuration,
+  history, logs, and locks, so the former per-user Linux service/checkout sharing
+  problem no longer applies. Use separate bot tokens and volumes for independent
+  deployments.
 
 - **#13, #14, #15, #16, #17, #25 — Windows task-management issues retired.**
   Windows daemon support, its PowerShell scripts, and task-management tests
-  have been removed. Managed operation now uses Linux systemd only. Linux
-  manual-stop behavior and retained autostart are documented in `README.md`.
+  have been removed. Managed operation is now Docker Compose only; the former
+  Linux systemd helper is an unsupported reference in `examples/systemd/`.
+  Compose restart behavior and graceful shutdown are documented in `README.md`.
 
 - **#11 — Development documentation was out of date.** `AGENTS.md`, `README.md`,
-  and `npm run help` now describe the nine offline regression scripts and the
+  and `npm run help` now describe the ten offline regression scripts and the
   real model selftest. `commands-scope.mjs` is documented
   as a manual online diagnostic that reads `.env` and calls Telegram, excluded
   from `npm test`.
@@ -148,7 +146,7 @@ Lower-impact behavior, diagnostic gaps, and documentation or test improvements.
   fatal errors now pass through the redacting logger. Offline regressions cover
   synthetic bot/proxy credentials, retry exhaustion, and exit code 1.
 
-- **#26 — Service-test fixtures were invalid on Windows.** Fixed in `aa8f877`:
+- **#26 — Example service-test fixtures were invalid on Windows.** Fixed in `aa8f877`:
   real filesystem paths are portable; quote/backslash escaping uses string-only
   fixtures, and migration checks compare escaped paths. Simulated Windows
   validation passed; native Windows execution remained unverified. Windows

@@ -1,0 +1,35 @@
+# Template for a Docker Compose autostart unit (systemd system service).
+# Render it with the paths for this checkout; see README "Docker autostart".
+#
+# This is a system unit for a normal rootful Docker installation. Install it in
+# /etc/systemd/system/ and let systemd run `docker compose` as root. No
+# `docker` group membership is required. The gateway container still runs as
+# PUID:PGID from .env, so workspace file ownership is unchanged.
+#
+# For rootless Docker, adapt this as a systemd user unit instead. For rootless
+# Podman, use contrib/pi-telegram-gateway-podman.service.
+#
+# The unit runs `docker compose up` in the foreground and `down` on stop. Do
+# not replace the foreground `up` with `up -d` under Type=simple: the launcher
+# would exit immediately and systemd would restart the stack in a loop.
+[Unit]
+Description=pi Telegram gateway (Docker Compose)
+Documentation=file://@PROJECT_DIR@/README.md
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=@PROJECT_DIR@
+Environment=PATH=@DOCKER_DIR@:/usr/local/bin:/usr/bin:/bin
+ExecStart=@DOCKER_BIN@ compose -p pi-telegram-gateway -f docker-compose.yml up gateway
+ExecStop=@DOCKER_BIN@ compose -p pi-telegram-gateway -f docker-compose.yml down
+Restart=always
+RestartSec=10
+TimeoutStartSec=180
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

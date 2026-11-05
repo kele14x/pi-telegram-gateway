@@ -46,7 +46,7 @@ if (invokedPath === import.meta.url) {
   const rootFlag = process.argv.indexOf("--root");
   const root = rootFlag >= 0 ? process.argv[rootFlag + 1] : undefined;
   if (!root) {
-    console.error("Usage: node scripts/rotate-logs.mjs --root <gateway-root>");
+    console.error("Usage: node examples/systemd/rotate-logs.mjs --root <gateway-root>");
     process.exitCode = 1;
   } else {
     try {

@@ -7,45 +7,42 @@ const root = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(root, "..", "package.json"), "utf8"));
 
 const SCRIPT_DESC = {
-  start: "run the gateway in the foreground (visible output)",
-  "start:daemon": "start it in the background via the Linux systemd user service",
-  "restart:daemon": "restart the Linux service with graceful shutdown; start it if stopped",
-  "autostart:setup": "register or safely refresh the Linux systemd user service",
-  "autostart:remove": "stop and remove autostart; keep config/data/logs",
-  stop: "stop the managed gateway and its child processes",
-  status: "show user-service status and process PID",
-  help: "this cheat sheet",
-  selftest: "send one real model prompt through the pi SDK (may incur cost; no Telegram bot needed)",
-  test: "run the nine offline regression scripts",
+  selftest: "development-only host diagnostic: one real model prompt, no bot",
+  test: "run the ten offline regression scripts",
   typecheck: "type-check the TypeScript sources (tsc --noEmit)",
+  help: "this cheat sheet",
 };
 
 console.log("pi-telegram-gateway — operating cheat sheet");
 console.log("=".repeat(52));
-console.log("\nLOCAL CONSOLE COMMANDS (run from this project folder):\n");
+console.log("\nDEVELOPMENT COMMANDS (run from this project folder):\n");
 for (const [name, script] of Object.entries(pkg.scripts ?? {})) {
   const desc = SCRIPT_DESC[name] ?? "";
   console.log(`  npm run ${name.padEnd(18)} ${desc}`);
 }
 console.log(`
-MANUAL ONLINE DIAGNOSTIC (excluded from npm test):
-  node test/commands-scope.mjs
-    inspect scoped command menus; reads .env and calls Telegram`);
-if (process.platform === "linux") console.log(`
-  Linux: systemctl --user (no sudo); autostart runs at login.
-  Unit: ~/.config/systemd/user/pi-telegram-gateway.service
-        or $XDG_CONFIG_HOME/systemd/user/pi-telegram-gateway.service
-  Setup registers the service; npm run start:daemon starts it now.
-  npm run restart:daemon applies code/config changes; active work is cancelled.
-  A foreground npm start is stopped with Ctrl+C.
+DOCKER COMPOSE (supported deployment):
+  cp .env.example .env                  set TELEGRAM_BOT_TOKEN and ALLOWED_TELEGRAM_IDS
+  mkdir -p workspace                    or point PI_WORKSPACE at an existing folder
+  docker compose run --rm --build pi-setup
+                                        /login, /model, then /quit
+  docker compose up -d --build          start in the background
+  docker compose logs -f                follow gateway output
+  docker compose down                   graceful stop; keeps the data volume
+  docker compose down -v                destructive: deletes credentials and history
 
-  Containerized alternative (rootless Podman):
-    podman-compose --in-pod=false -p pi-telegram-gateway -f docker-compose.yml -f compose.podman.yaml ...
-    Unit: ~/.config/systemd/user/pi-telegram-gateway-podman.service
-    Docs: README section "Podman"`);
-else console.log("\n  Managed daemon commands require Linux with systemd; use npm start on this OS.");
+Rootless Podman:
+  podman-compose --in-pod=false -p pi-telegram-gateway -f docker-compose.yml -f compose.podman.yaml up -d gateway
+  See README "Podman" and compose.podman.yaml.
 
-console.log("TELEGRAM BOT COMMANDS (send to @your_bot in chat):\n");
+Linux systemd autostart templates:
+  contrib/pi-telegram-gateway-docker.service   system unit (rootful Docker)
+  contrib/pi-telegram-gateway-podman.service   user unit (rootless Podman)
+
+Host systemd helpers are no longer supported. The former direct-host scripts
+live in examples/systemd/ as reference only.`);
+
+console.log("\nTELEGRAM BOT COMMANDS (send to @your_bot in chat):\n");
 const botCmds = [
   ["/start", "welcome message and quick guide"],
   ["/help", "show available commands"],
@@ -60,14 +57,18 @@ const botCmds = [
 for (const [cmd, desc] of botCmds) console.log(`  ${cmd.padEnd(18)} ${desc}`);
 
 console.log(`
-KEY PATHS:
-  logs/gateway.log      runtime log
-  logs/gateway-err.log  managed stderr log
-  logs/archive/         newest 20 pre-launch archives per log type
-  logs/gateway-events.jsonl  lifecycle events for the agent (start/stop/crash/cancel)
-  sessions/chat-<id>.jsonl   per-chat conversation history
-  compose.podman.yaml   Podman-only Compose override (keep-id); host flags in .env
-  .env                  config (bot token, allowlist) — never committed
+CONTAINER PATHS:
+  /workspace             mounted host workspace (default chat folder)
+  /data/pi-agent         pi credentials, settings, models, extensions
+  /data/sessions         per-chat conversation history and meta.json
+  /data/logs             instance lock and gateway-events.jsonl
+  logs/                  host-side output from the unsupported systemd example only
+
+REPOSITORY:
+  .env                  Compose configuration — never committed
+  compose.podman.yaml   Podman-only Compose override (keep-id)
+  examples/systemd/     unsupported direct-host systemd example
+  test/commands-scope.mjs  manual online diagnostic; not part of npm test
 
 DOCS: https://github.com/kele14x/pi-telegram-gateway
 `.trimEnd());
